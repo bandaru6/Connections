@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+
+# OS junk
+.DS_Store
+
+# Local artifacts
+celebs/celeb_graph.gpickle
+celebs/edges.csv
+celebs/embeddings.pkl
