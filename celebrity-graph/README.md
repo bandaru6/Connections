@@ -1,11 +1,37 @@
-# Photo-Based Celebrity Connection Graph
+# Celebrity Connection Graph
 
 This project builds a graph of real-world relationships between public figures
 based on shared appearances in photographs.
 
-Each photo is treated as evidence of physical co-presence.
-Faces are detected and embedded, relationships are modeled as a graph,
-and queries return both the connection path and the images that justify each link.
+A photo is treated as evidence of physical co-presence. If two people appear in
+the same image, an edge is created between them. Repeated co-appearances increase
+edge weight.
 
-The project is intentionally backend-focused and UI-free to emphasize
-data modeling, algorithms, and system design.
+The system is intentionally backend-only and deterministic, designed to
+demonstrate data modeling, graph algorithms, and system design.
+
+## Data Contracts
+
+### 1. Input Manifest
+
+`celebs/manifest.json`
+
+```json
+{
+  "some_image.jpg": ["Person A", "Person B", "Person C"]
+}
+```
+
+### 2. Edge List
+
+(celebs/edges.csv)
+
+columns: person_a,person_b,image
+
+each row = one evidence event
+
+### 3. Graph Artifact
+
+undirected, nodes=people
+
+edge attrs: weight, images
