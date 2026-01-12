@@ -1,0 +1,26 @@
+# Python venvs
+.venv*/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Phase 2 artifacts (generated) - ignore contents but keep folder
+phase2-engine/artifacts/*
+!phase2-engine/artifacts/.gitkeep
+
+# Phase 2 data - ignore images but keep folder structure
+# First, unignore the directories themselves
+!phase2-engine/data/
+!phase2-engine/data/profiles/
+!phase2-engine/data/ingest/
+
+# Then ignore contents of each data folder (except .gitkeep)
+phase2-engine/data/profiles/*
+phase2-engine/data/ingest/*
+!phase2-engine/data/**/.gitkeep
+
+# OS junk
+.DS_Store
