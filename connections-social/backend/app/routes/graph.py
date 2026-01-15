@@ -1,7 +1,8 @@
 """Graph read API endpoints for querying the social graph."""
 
 import logging
-from typing import List, Optional
+from collections import deque
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -223,3 +224,146 @@ def graph_neighbors(
     except Exception as e:
         logger.error(f"Graph neighbors failed: {e}")
         raise HTTPException(status_code=500, detail=f"Graph neighbors failed: {e}")
+
+
+@router.get("/ego")
+def graph_ego(
+    person: str = Query(..., description="Center person name for ego network"),
+    depth: int = Query(2, ge=1, le=3, description="Depth of neighborhood (1-3 hops)"),
+    limit: int = Query(50, ge=1, le=200, description="Max nodes to return"),
+    include_unknown: bool = Query(True, description="Include UNKNOWN persons")
+):
+    """
+    Get the ego network centered on a person.
+
+    Returns nodes and edges within `depth` hops of the center person.
+    The limit applies to total nodes returned (center + neighbors).
+    Results are sorted deterministically by name.
+    """
+    try:
+        with get_cursor() as cur:
+            # Check if person exists
+            cur.execute("SELECT id, name FROM persons WHERE name = %s", (person,))
+            person_row = cur.fetchone()
+
+            if not person_row:
+                raise HTTPException(status_code=404, detail=f"Person '{person}' not found")
+
+            center_id = str(person_row['id'])
+            center_name = person_row['name']
+
+            # If person is UNKNOWN and include_unknown=false, return error
+            if not include_unknown and center_name.startswith('UNKNOWN_'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot query UNKNOWN person '{center_name}' with include_unknown=false"
+                )
+
+            # Load all persons for lookup
+            cur.execute("SELECT id, name FROM persons")
+            person_lookup: Dict[str, str] = {}  # id -> name
+            for row in cur.fetchall():
+                person_lookup[str(row['id'])] = row['name']
+
+            # Load all edges
+            cur.execute("""
+                SELECT person_a_id, person_b_id, weight
+                FROM edges
+            """)
+
+            # Build adjacency list
+            adjacency: Dict[str, List[Tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
+            all_edges: List[Tuple[str, str, int]] = []
+
+            for row in cur.fetchall():
+                a_id = str(row['person_a_id'])
+                b_id = str(row['person_b_id'])
+                weight = row['weight']
+
+                a_name = person_lookup.get(a_id, '')
+                b_name = person_lookup.get(b_id, '')
+
+                # Skip UNKNOWN edges if not included
+                if not include_unknown:
+                    if a_name.startswith('UNKNOWN_') or b_name.startswith('UNKNOWN_'):
+                        continue
+
+                if a_id not in adjacency:
+                    adjacency[a_id] = []
+                if b_id not in adjacency:
+                    adjacency[b_id] = []
+
+                adjacency[a_id].append((b_id, weight))
+                adjacency[b_id].append((a_id, weight))
+                all_edges.append((a_id, b_id, weight))
+
+            # BFS to find nodes within depth
+            visited: Set[str] = set()
+            queue: deque = deque()
+            queue.append((center_id, 0))
+            visited.add(center_id)
+
+            nodes_in_ego: List[str] = []
+
+            while queue and len(nodes_in_ego) < limit:
+                current_id, current_depth = queue.popleft()
+                nodes_in_ego.append(current_id)
+
+                if current_depth < depth:
+                    neighbors = adjacency.get(current_id, [])
+                    # Sort neighbors by name for determinism
+                    neighbors_sorted = sorted(
+                        neighbors,
+                        key=lambda x: person_lookup.get(x[0], '')
+                    )
+                    for neighbor_id, _ in neighbors_sorted:
+                        if neighbor_id not in visited:
+                            visited.add(neighbor_id)
+                            queue.append((neighbor_id, current_depth + 1))
+
+            # Collect nodes
+            ego_node_ids = set(nodes_in_ego[:limit])
+            nodes_output = []
+            for node_id in sorted(ego_node_ids, key=lambda x: person_lookup.get(x, '')):
+                name = person_lookup.get(node_id, 'Unknown')
+                nodes_output.append({
+                    'name': name,
+                    'is_unknown': name.startswith('UNKNOWN_')
+                })
+
+            # Collect edges between ego nodes
+            edges_output = []
+            seen_edges: Set[Tuple[str, str]] = set()
+
+            for a_id, b_id, weight in all_edges:
+                if a_id in ego_node_ids and b_id in ego_node_ids:
+                    # Ensure consistent ordering
+                    edge_key = (min(a_id, b_id), max(a_id, b_id))
+                    if edge_key not in seen_edges:
+                        seen_edges.add(edge_key)
+                        a_name = person_lookup.get(a_id, 'Unknown')
+                        b_name = person_lookup.get(b_id, 'Unknown')
+                        # Sort names for consistent output
+                        if a_name > b_name:
+                            a_name, b_name = b_name, a_name
+                        edges_output.append({
+                            'source': a_name,
+                            'target': b_name,
+                            'weight': weight
+                        })
+
+            # Sort edges for determinism
+            edges_output.sort(key=lambda e: (e['source'], e['target']))
+
+            return {
+                'center': center_name,
+                'depth': depth,
+                'nodes': nodes_output,
+                'edges': edges_output
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Graph ego failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Graph ego failed: {e}")
