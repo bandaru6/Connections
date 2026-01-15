@@ -72,15 +72,15 @@ CREATE INDEX idx_edge_evidence_edge ON edge_evidence(person_a_id, person_b_id);
 CREATE INDEX idx_edge_evidence_upload ON edge_evidence(upload_id);
 
 -- Processed images: tracks which images have been ingested (for idempotency)
-CREATE TABLE processed_images (
+CREATE TABLE IF NOT EXISTS processed_images (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     filename TEXT UNIQUE NOT NULL,
     processed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_processed_images_filename ON processed_images(filename);
-CREATE INDEX idx_processed_images_processed_at ON processed_images(processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_processed_images_filename ON processed_images(filename);
+CREATE INDEX IF NOT EXISTS idx_processed_images_processed_at ON processed_images(processed_at DESC);
 
 -- Additional indexes for graph queries
-CREATE INDEX idx_edges_weight ON edges(weight DESC);
-CREATE INDEX idx_persons_name ON persons(name);
+CREATE INDEX IF NOT EXISTS idx_edges_weight ON edges(weight DESC);
+CREATE INDEX IF NOT EXISTS idx_persons_name ON persons(name);
