@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI
 
 from app.db import check_db_connection
-from app.routes import admin, ingest
+from app.routes import admin, ingest, graph
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +22,7 @@ app = FastAPI(
 # Include routers
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(ingest.router, prefix="/ingest", tags=["ingest"])
+app.include_router(graph.router, prefix="/graph", tags=["graph"])
 
 
 @app.get("/health")
