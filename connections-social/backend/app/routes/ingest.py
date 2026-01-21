@@ -379,12 +379,15 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
 
 
 @router.post("/upload")
-async def ingest_upload(image: UploadFile = File(...)):
+async def ingest_upload(image: UploadFile = File(...), force: bool = False):
     """
     Ingest a single uploaded image.
 
     Accepts multipart form with:
     - image: The image file to process
+
+    Query params:
+    - force: If True, re-process image even if already processed
 
     Returns stats about faces detected, matches, and edges created.
     """
@@ -413,10 +416,18 @@ async def ingest_upload(image: UploadFile = File(...)):
 
             # Check if already processed
             if is_already_processed(cur, filename):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Image {filename} has already been processed"
-                )
+                if force:
+                    # Force mode: delete existing record so we can re-process
+                    cur.execute(
+                        "DELETE FROM processed_images WHERE filename = %s",
+                        (filename,)
+                    )
+                    logger.info(f"Force mode: removed {filename} from processed_images")
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Image {filename} has already been processed"
+                    )
 
             # Load profile embeddings
             profiles = load_profile_embeddings(cur)
@@ -424,6 +435,8 @@ async def ingest_upload(image: UploadFile = File(...)):
             # Process the image
             stats = process_single_image(cur, file_path, profiles)
 
+            if force:
+                stats['force_mode'] = True
             return stats
 
     except HTTPException:
@@ -434,12 +447,15 @@ async def ingest_upload(image: UploadFile = File(...)):
 
 
 @router.post("/folder")
-def ingest_folder():
+def ingest_folder(force: bool = False):
     """
     Process all images in the uploads folder.
 
-    Skips files that have already been processed.
+    Skips files that have already been processed (unless force=True).
     Processes images in sorted filename order for determinism.
+
+    Query params:
+    - force: If True, re-process all images regardless of processed_images state
 
     Returns batch stats.
     """
@@ -487,11 +503,19 @@ def ingest_folder():
             for image_path in image_files:
                 filename = image_path.name
 
-                # Check if already processed
+                # Check if already processed (unless force mode)
                 if is_already_processed(cur, filename):
-                    logger.info(f"Skipping already processed: {filename}")
-                    skipped += 1
-                    continue
+                    if force:
+                        # Force mode: delete existing record so we can re-process
+                        cur.execute(
+                            "DELETE FROM processed_images WHERE filename = %s",
+                            (filename,)
+                        )
+                        logger.info(f"Force mode: removed {filename} from processed_images")
+                    else:
+                        logger.info(f"Skipping already processed: {filename}")
+                        skipped += 1
+                        continue
 
                 try:
                     stats = process_single_image(cur, image_path, profiles)
@@ -511,7 +535,7 @@ def ingest_folder():
                         'error': e.detail
                     })
 
-            return {
+            response = {
                 'total_images': len(image_files),
                 'processed': processed,
                 'skipped': skipped,
@@ -521,6 +545,9 @@ def ingest_folder():
                 'total_edges_created': total_edges,
                 'results': results
             }
+            if force:
+                response['force_mode'] = True
+            return response
 
     except Exception as e:
         logger.error(f"Batch ingestion failed: {e}")

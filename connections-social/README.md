@@ -101,13 +101,35 @@ The `--sync-demo` flag copies images from `demo_uploads/` to `uploads/` before i
 
 Without images, the script still runs and shows the API responses (with `processed: 0`).
 
+### Demo Reset
+
+**Important:** `POST /admin/rebuild-profile-index` now clears ingestion history (`processed_images`, `uploads`, `faces`) in addition to persons. This means `POST /ingest/folder` will re-process all images after a rebuild.
+
+To reset just the graph/ingestion state (without rebuilding profiles):
+
+```bash
+# Reset demo state (keeps persons/profiles, clears graph + ingestion history)
+curl -X POST http://localhost:8000/admin/reset-demo
+
+# Then re-ingest
+curl -X POST http://localhost:8000/ingest/folder
+```
+
+To force re-processing without any reset:
+
+```bash
+# Force re-process all images (ignores processed_images)
+curl -X POST "http://localhost:8000/ingest/folder?force=true"
+```
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | API info and endpoint list |
 | `/health` | GET | Health check with database status |
-| `/admin/rebuild-profile-index` | POST | Rebuild person index from profile photos |
+| `/admin/rebuild-profile-index` | POST | Rebuild person index from profile photos (clears all ingestion state) |
+| `/admin/reset-demo` | POST | Reset graph + ingestion state (keeps profiles) |
 | `/ingest/upload` | POST | Upload and process a single image |
 | `/ingest/folder` | POST | Process all images in `uploads/` folder |
 | `/graph/summary` | GET | Graph statistics and top edges |
@@ -116,7 +138,10 @@ Without images, the script still runs and shows the API responses (with `process
 
 ### Query Parameters
 
-Most graph endpoints support:
+**Ingest endpoints** support:
+- `force=true` - Re-process images even if already processed (bypasses `processed_images` check)
+
+**Graph endpoints** support:
 - `include_unknown=true|false` - Include/exclude UNKNOWN_* persons (default: true)
 - `limit=N` - Limit number of results
 

@@ -126,9 +126,11 @@ def rebuild_profile_index():
     try:
         with get_cursor() as cur:
             # Clear existing data (rebuild = full refresh)
+            # Also clear ingestion history so we can re-ingest
+            cur.execute("TRUNCATE uploads, faces, processed_images CASCADE")
             cur.execute("DELETE FROM person_profiles")
             cur.execute("DELETE FROM persons")
-            logger.info("Cleared existing persons and person_profiles")
+            logger.info("Cleared existing persons, profiles, and ingestion history")
 
             # Process each image in deterministic order
             for person_name, image_path in profile_images:
@@ -168,6 +170,8 @@ def rebuild_profile_index():
         # Build summary report
         summary = {
             "status": "completed",
+            "ingestion_state_cleared": True,
+            "tables_cleared": ["persons", "person_profiles", "uploads", "faces", "processed_images"],
             "profiles_dir": str(PROFILES_DIR),
             "total_images_scanned": len(profile_images),
             "persons_created": persons_created,
@@ -189,4 +193,41 @@ def rebuild_profile_index():
         raise HTTPException(
             status_code=500,
             detail=f"Profile index rebuild failed: {e}"
+        )
+
+
+@router.post("/reset-demo")
+def reset_demo():
+    """
+    Reset all ingestion and graph state for demo purposes.
+
+    Clears uploads, faces, edges, edge_evidence, and processed_images.
+    Keeps persons and person_profiles intact so you don't need to rebuild profiles.
+
+    Use this when you want to re-run the demo with the same images without
+    rebuilding the profile index.
+    """
+    logger.info("Starting demo reset - clearing ingestion and graph state")
+
+    try:
+        with get_cursor() as cur:
+            # Clear graph and ingestion tables, preserving persons/profiles
+            # TRUNCATE with CASCADE handles foreign key dependencies
+            cur.execute("""
+                TRUNCATE uploads, faces, edges, edge_evidence, processed_images
+                CASCADE
+            """)
+            logger.info("Cleared uploads, faces, edges, edge_evidence, processed_images")
+
+        return {
+            "status": "completed",
+            "cleared": ["uploads", "faces", "edges", "edge_evidence", "processed_images"],
+            "preserved": ["persons", "person_profiles"]
+        }
+
+    except Exception as e:
+        logger.error(f"Demo reset failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Demo reset failed: {e}"
         )
