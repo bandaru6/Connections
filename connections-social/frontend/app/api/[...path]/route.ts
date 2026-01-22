@@ -28,22 +28,41 @@ async function proxyRequest(
   const url = `${BACKEND_URL}${path}${searchParams ? '?' + searchParams : ''}`
 
   try {
+    const contentType = request.headers.get('content-type') || ''
+    const isMultipart = contentType.includes('multipart/form-data')
+    const isJson = contentType.includes('application/json')
+
     const fetchOptions: RequestInit = {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-      },
     }
 
     // Forward body for POST requests
     if (method === 'POST') {
-      try {
-        const body = await request.text()
-        if (body) {
-          fetchOptions.body = body
+      if (isMultipart) {
+        // For multipart/form-data, pass through the raw body and let fetch set headers
+        const formData = await request.formData()
+        fetchOptions.body = formData
+        // Don't set Content-Type - let fetch handle it with proper boundary
+      } else if (isJson) {
+        fetchOptions.headers = { 'Content-Type': 'application/json' }
+        try {
+          const body = await request.text()
+          if (body) {
+            fetchOptions.body = body
+          }
+        } catch {
+          // No body, that's fine
         }
-      } catch {
-        // No body, that's fine
+      } else {
+        // Default: try to pass through as text
+        try {
+          const body = await request.text()
+          if (body) {
+            fetchOptions.body = body
+          }
+        } catch {
+          // No body, that's fine
+        }
       }
     }
 

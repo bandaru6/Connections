@@ -29,40 +29,49 @@ def get_evidence_filenames(cur, person_a_id: str, person_b_id: str, limit: int =
 
 
 @router.get("/summary")
-def graph_summary(include_unknown: bool = Query(True, description="Include UNKNOWN persons in counts and top_edges")):
+def graph_summary(include_unknown: bool = Query(False, description="Include UNKNOWN persons in counts and top_edges")):
     """
     Get a summary of the social graph.
 
     Returns:
-    - persons_total: total persons (including UNKNOWNs)
-    - unknown_persons_total: count of UNKNOWN_* persons (always reported)
+    - persons_total: total persons (respects include_unknown filter for display)
+    - known_persons_total: count of known (non-UNKNOWN) persons
+    - unknown_persons_total: count of UNKNOWN_* persons
     - edges_total: total edges (respects include_unknown filter)
+    - edges_known_only_total: edges between known persons only
     - top_edges: top 10 edges by weight (respects include_unknown filter)
     - recent_uploads: 10 most recent processed images
     """
     try:
         with get_cursor() as cur:
-            # Total persons (always includes unknowns)
-            cur.execute("SELECT COUNT(*) as cnt FROM persons")
-            persons_total = cur.fetchone()['cnt']
+            # Known persons count
+            cur.execute("SELECT COUNT(*) as cnt FROM persons WHERE name NOT LIKE 'UNKNOWN_%'")
+            known_persons_total = cur.fetchone()['cnt']
 
-            # Unknown persons count (always reported)
+            # Unknown persons count
             cur.execute("SELECT COUNT(*) as cnt FROM persons WHERE name LIKE 'UNKNOWN_%'")
             unknown_persons_total = cur.fetchone()['cnt']
 
-            # Edges total (respects include_unknown)
-            if include_unknown:
-                cur.execute("SELECT COUNT(*) as cnt FROM edges")
-            else:
-                cur.execute("""
-                    SELECT COUNT(*) as cnt
-                    FROM edges e
-                    JOIN persons pa ON e.person_a_id = pa.id
-                    JOIN persons pb ON e.person_b_id = pb.id
-                    WHERE pa.name NOT LIKE 'UNKNOWN_%'
-                      AND pb.name NOT LIKE 'UNKNOWN_%'
-                """)
-            edges_total = cur.fetchone()['cnt']
+            # Total persons (respects filter for display purposes)
+            persons_total = known_persons_total + (unknown_persons_total if include_unknown else 0)
+
+            # Edges between known persons only (always computed)
+            cur.execute("""
+                SELECT COUNT(*) as cnt
+                FROM edges e
+                JOIN persons pa ON e.person_a_id = pa.id
+                JOIN persons pb ON e.person_b_id = pb.id
+                WHERE pa.name NOT LIKE 'UNKNOWN_%'
+                  AND pb.name NOT LIKE 'UNKNOWN_%'
+            """)
+            edges_known_only_total = cur.fetchone()['cnt']
+
+            # Total edges (all edges)
+            cur.execute("SELECT COUNT(*) as cnt FROM edges")
+            edges_all_total = cur.fetchone()['cnt']
+
+            # edges_total respects include_unknown filter
+            edges_total = edges_all_total if include_unknown else edges_known_only_total
 
             # Top edges (respects include_unknown)
             if include_unknown:
@@ -113,8 +122,10 @@ def graph_summary(include_unknown: bool = Query(True, description="Include UNKNO
 
             return {
                 'persons_total': persons_total,
+                'known_persons_total': known_persons_total,
                 'unknown_persons_total': unknown_persons_total,
                 'edges_total': edges_total,
+                'edges_known_only_total': edges_known_only_total,
                 'top_edges': top_edges,
                 'recent_uploads': recent_uploads
             }
@@ -128,7 +139,7 @@ def graph_summary(include_unknown: bool = Query(True, description="Include UNKNO
 def graph_neighbors(
     person: str = Query(..., description="Person name to find neighbors for"),
     limit: int = Query(25, ge=1, le=100, description="Max neighbors to return"),
-    include_unknown: bool = Query(True, description="Include UNKNOWN neighbors")
+    include_unknown: bool = Query(False, description="Include UNKNOWN neighbors (unmatched faces)")
 ):
     """
     Get neighbors of a person in the social graph.
@@ -231,7 +242,7 @@ def graph_ego(
     person: str = Query(..., description="Center person name for ego network"),
     depth: int = Query(2, ge=1, le=3, description="Depth of neighborhood (1-3 hops)"),
     limit: int = Query(50, ge=1, le=200, description="Max nodes to return"),
-    include_unknown: bool = Query(True, description="Include UNKNOWN persons")
+    include_unknown: bool = Query(False, description="Include UNKNOWN persons (unmatched faces)")
 ):
     """
     Get the ego network centered on a person.
@@ -367,3 +378,223 @@ def graph_ego(
     except Exception as e:
         logger.error(f"Graph ego failed: {e}")
         raise HTTPException(status_code=500, detail=f"Graph ego failed: {e}")
+
+
+@router.get("/path")
+def graph_path(
+    source: str = Query(..., description="Source person name"),
+    target: str = Query(..., description="Target person name"),
+    include_unknown: bool = Query(False, description="Include UNKNOWN persons in path")
+):
+    """
+    Find the shortest path between two people using BFS.
+
+    Returns the path as a list of person names and the edges connecting them.
+    """
+    try:
+        with get_cursor() as cur:
+            # Check if source exists
+            cur.execute("SELECT id, name FROM persons WHERE name = %s", (source,))
+            source_row = cur.fetchone()
+            if not source_row:
+                raise HTTPException(status_code=404, detail=f"Source person '{source}' not found")
+
+            # Check if target exists
+            cur.execute("SELECT id, name FROM persons WHERE name = %s", (target,))
+            target_row = cur.fetchone()
+            if not target_row:
+                raise HTTPException(status_code=404, detail=f"Target person '{target}' not found")
+
+            source_id = str(source_row['id'])
+            target_id = str(target_row['id'])
+            source_name = source_row['name']
+            target_name = target_row['name']
+
+            # Check UNKNOWN constraints
+            if not include_unknown:
+                if source_name.startswith('UNKNOWN_'):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot query UNKNOWN person '{source_name}' with include_unknown=false"
+                    )
+                if target_name.startswith('UNKNOWN_'):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot query UNKNOWN person '{target_name}' with include_unknown=false"
+                    )
+
+            # Same source and target
+            if source_id == target_id:
+                return {
+                    'source': source_name,
+                    'target': target_name,
+                    'found': True,
+                    'path': [source_name],
+                    'hops': 0,
+                    'edges': []
+                }
+
+            # Load all persons for lookup
+            cur.execute("SELECT id, name FROM persons")
+            person_lookup: Dict[str, str] = {}  # id -> name
+            for row in cur.fetchall():
+                person_lookup[str(row['id'])] = row['name']
+
+            # Load all edges
+            cur.execute("""
+                SELECT person_a_id, person_b_id, weight
+                FROM edges
+            """)
+
+            # Build adjacency list
+            adjacency: Dict[str, List[Tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
+            edge_weights: Dict[Tuple[str, str], int] = {}  # (a_id, b_id) -> weight
+
+            for row in cur.fetchall():
+                a_id = str(row['person_a_id'])
+                b_id = str(row['person_b_id'])
+                weight = row['weight']
+
+                a_name = person_lookup.get(a_id, '')
+                b_name = person_lookup.get(b_id, '')
+
+                # Skip UNKNOWN edges if not included
+                if not include_unknown:
+                    if a_name.startswith('UNKNOWN_') or b_name.startswith('UNKNOWN_'):
+                        continue
+
+                if a_id not in adjacency:
+                    adjacency[a_id] = []
+                if b_id not in adjacency:
+                    adjacency[b_id] = []
+
+                adjacency[a_id].append((b_id, weight))
+                adjacency[b_id].append((a_id, weight))
+
+                # Store edge weight (both directions)
+                edge_key = (min(a_id, b_id), max(a_id, b_id))
+                edge_weights[edge_key] = weight
+
+            # BFS to find shortest path
+            visited: Set[str] = set()
+            parent: Dict[str, str] = {}  # child_id -> parent_id
+            queue: deque = deque()
+            queue.append(source_id)
+            visited.add(source_id)
+
+            found = False
+            while queue:
+                current_id = queue.popleft()
+
+                if current_id == target_id:
+                    found = True
+                    break
+
+                for neighbor_id, _ in adjacency.get(current_id, []):
+                    if neighbor_id not in visited:
+                        visited.add(neighbor_id)
+                        parent[neighbor_id] = current_id
+                        queue.append(neighbor_id)
+
+            if not found:
+                return {
+                    'source': source_name,
+                    'target': target_name,
+                    'found': False,
+                    'path': [],
+                    'hops': 0,
+                    'edges': []
+                }
+
+            # Reconstruct path
+            path_ids: List[str] = []
+            current = target_id
+            while current:
+                path_ids.append(current)
+                current = parent.get(current)
+            path_ids.reverse()
+
+            # Build path names and edges
+            path_names = [person_lookup.get(pid, 'Unknown') for pid in path_ids]
+            edges_output = []
+
+            for i in range(len(path_ids) - 1):
+                a_id = path_ids[i]
+                b_id = path_ids[i + 1]
+                edge_key = (min(a_id, b_id), max(a_id, b_id))
+                weight = edge_weights.get(edge_key, 1)
+
+                a_name = person_lookup.get(a_id, 'Unknown')
+                b_name = person_lookup.get(b_id, 'Unknown')
+
+                # Get evidence for this edge
+                evidence = get_evidence_filenames(cur, a_id, b_id)
+                if not evidence:
+                    evidence = get_evidence_filenames(cur, b_id, a_id)
+
+                edges_output.append({
+                    'person_a': a_name,
+                    'person_b': b_name,
+                    'weight': weight,
+                    'evidence': evidence
+                })
+
+            return {
+                'source': source_name,
+                'target': target_name,
+                'found': True,
+                'path': path_names,
+                'hops': len(path_names) - 1,
+                'edges': edges_output
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Graph path failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Graph path failed: {e}")
+
+
+@router.get("/persons/list")
+def list_persons(
+    q: Optional[str] = Query(None, description="Search query filter (case-insensitive)"),
+    include_unknown: bool = Query(False, description="Include UNKNOWN persons"),
+    limit: int = Query(50, ge=1, le=500, description="Max persons to return")
+):
+    """
+    List persons in the graph.
+    """
+    try:
+        with get_cursor() as cur:
+            # Base query
+            query = "SELECT name FROM persons"
+            params = []
+            conditions = []
+
+            # Filter unknown
+            if not include_unknown:
+                conditions.append("name NOT LIKE 'UNKNOWN_%%'")
+            
+            # Filter by search query
+            if q:
+                conditions.append("name ILIKE %s")
+                params.append(f"%{q}%")
+            
+            # Assemble query
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            
+            query += " ORDER BY name LIMIT %s"
+            params.append(limit)
+
+            cur.execute(query, tuple(params))
+            persons = [row['name'] for row in cur.fetchall()]
+
+            return {
+                'count': len(persons),
+                'persons': persons
+            }
+
+    except Exception as e:
+        logger.error(f"List persons failed: {e}")
+        raise HTTPException(status_code=500, detail=f"List persons failed: {e}")

@@ -1,5 +1,7 @@
-# Uploads and local artifacts
+# Uploads and local data (large image folders)
 uploads/
+data/group_photos/
+data/profiles/
 *.db
 
 # Python

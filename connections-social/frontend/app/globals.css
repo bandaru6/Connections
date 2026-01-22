@@ -265,8 +265,8 @@ body {
 
 .neighbor-item {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 0.25rem;
   padding: 0.5rem 0;
   border-bottom: 1px solid var(--border);
 }
@@ -275,9 +275,26 @@ body {
   border-bottom: none;
 }
 
+.neighbor-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.neighbor-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
 .neighbor-weight {
   color: var(--text-secondary);
   font-size: 0.75rem;
+}
+
+.neighbor-evidence {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
 }
 
 .neighbors-list-empty {
@@ -482,4 +499,212 @@ body {
 .timestamp {
   font-size: 0.75rem;
   color: var(--text-secondary);
+}
+
+/* Last Action Status Panel */
+.last-action {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.last-action.success {
+  border-color: var(--success);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.last-action.error {
+  border-color: var(--error);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.last-action.pending {
+  border-color: var(--warning);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.last-action-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.last-action-name {
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.last-action-duration {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.last-action-result {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-family: 'Monaco', 'Menlo', monospace;
+  background: var(--bg-primary);
+  padding: 0.5rem;
+  border-radius: 4px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+/* Upload Progress */
+.upload-progress {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.upload-progress-item {
+  font-size: 0.75rem;
+  padding: 0.25rem 0;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.upload-progress-item:last-child {
+  border-bottom: none;
+}
+
+.upload-progress-item.success {
+  color: var(--success);
+}
+
+.upload-progress-item.error {
+  color: var(--error);
+}
+
+/* Confirmation Box */
+.confirmation-box {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.confirmation-box-title {
+  font-weight: 500;
+  font-size: 0.875rem;
+  color: var(--warning);
+  margin-bottom: 0.5rem;
+}
+
+.confirmation-box-message {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
+.confirmation-box-match {
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.confirmation-box-match strong {
+  color: var(--text-primary);
+}
+
+.confirmation-box-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.btn-warning {
+  background: var(--warning);
+  color: #000;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: #d97706;
+}
+
+.btn-danger {
+  background: var(--error);
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+/* Evidence Links */
+.evidence-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.evidence-link {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.evidence-link:hover {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.evidence-more {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-left: 0.25rem;
+}
+
+/* File Input */
+.file-input-wrapper {
+  position: relative;
+}
+
+.file-input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.file-input:hover {
+  border-color: var(--accent);
+}
+
+.file-input::file-selector-button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  margin-right: 0.75rem;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.file-count {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
 }

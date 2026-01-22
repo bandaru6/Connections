@@ -107,7 +107,7 @@ if [ "$SYNC_DEMO" = true ]; then
         mkdir -p "$UPLOADS_DIR"
         count=0
         for ext in jpg jpeg png JPG JPEG PNG; do
-            for f in "$DEMO_DIR"/*."$ext" 2>/dev/null; do
+            for f in "$DEMO_DIR"/*."$ext" /dev/null; do
                 if [ -f "$f" ]; then
                     fname=$(basename "$f")
                     if [ ! -f "$UPLOADS_DIR/$fname" ]; then

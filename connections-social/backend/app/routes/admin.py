@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException
 
-from app.config import PROFILES_DIR, INSIGHTFACE_MODEL
+from app.config import PROFILES_DIR, UPLOADS_DIR, BASE_DIR, INSIGHTFACE_MODEL
 from app.db import get_cursor
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ def rebuild_profile_index():
     """
     Rebuild the profile index by scanning profile images and extracting embeddings.
 
-    - Scans ~/Connections/phase2-engine/data/profiles
+    - Scans data/profiles/ directory
     - Runs InsightFace (buffalo_l) to enforce exactly 1 face per profile image
     - Inserts persons + person_profiles into Postgres
     - Embeddings stored as packed float32 in bytea
@@ -231,3 +231,71 @@ def reset_demo():
             status_code=500,
             detail=f"Demo reset failed: {e}"
         )
+
+
+@router.post("/clear-processed")
+def clear_processed():
+    """
+    Clear only the processed_images table.
+
+    Use this when you want to re-run ingest without resetting uploads/faces/edges.
+    Useful for testing different processing logic on the same images.
+    """
+    logger.info("Clearing processed_images table")
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("TRUNCATE processed_images")
+            cur.execute("SELECT COUNT(*) as count FROM processed_images")
+            count = cur.fetchone()["count"]
+
+        return {
+            "status": "completed",
+            "cleared": ["processed_images"],
+            "remaining_count": count
+        }
+
+    except Exception as e:
+        logger.error(f"Clear processed failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Clear processed failed: {e}"
+        )
+
+
+@router.get("/storage-info")
+def storage_info():
+    """
+    Get information about storage directories and file counts.
+
+    Returns paths and counts for:
+    - profiles_dir: Source of truth identities
+    - uploads_dir: Active ingestion directory (UI uploads + batch)
+    - group_photos_dir: Optional staging for batch datasets
+    """
+    def count_images(path: Path) -> int:
+        """Count image files in a directory (non-recursive)."""
+        if not path.exists():
+            return 0
+        return len([
+            f for f in path.iterdir()
+            if f.is_file() and f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'}
+        ])
+
+    def count_subdirs(path: Path) -> int:
+        """Count subdirectories (for profiles)."""
+        if not path.exists():
+            return 0
+        return len([d for d in path.iterdir() if d.is_dir()])
+
+    group_photos_dir = BASE_DIR / "data" / "group_photos"
+
+    return {
+        "profiles_dir": str(PROFILES_DIR),
+        "profiles_count": count_subdirs(PROFILES_DIR),
+        "uploads_dir": str(UPLOADS_DIR),
+        "uploads_count": count_images(UPLOADS_DIR),
+        "group_photos_dir": str(group_photos_dir),
+        "group_photos_count": count_images(group_photos_dir),
+        "base_dir": str(BASE_DIR)
+    }

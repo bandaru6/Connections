@@ -25,6 +25,21 @@ Group Photos → Face Detection → Identity Matching → Edge Creation
 3. **Create Edges**: Every pair of people in a photo creates/updates an edge with weight and evidence
 4. **Query Graph**: Explore connections via REST APIs
 
+## File Structure & Image Locations
+
+The system is self-contained. Here is where images live:
+
+*   **`data/profiles/`**: Source of truth for known identities.
+    *   Structure: `data/profiles/<Person Name>/<photo>.jpg`
+    *   Used by: `/admin/rebuild-profile-index`
+*   **`uploads/`**: The active ingestion folder.
+    *   Group photos uploaded via the UI or copied here are processed from this location.
+    *   Used by: `/ingest/folder` and `/ingest/upload`
+*   **`demo_uploads/`**: Backup of good demo images.
+    *   Use the demo script to copy these into `uploads/`.
+*   **`data/group_photos/`**: Optional dataset folder.
+    *   Can be used for batch processing large datasets (requires copying to `uploads/` currently).
+
 ## Quickstart
 
 ### 1. Start Database Services
@@ -37,8 +52,6 @@ docker compose up -d
 This starts:
 - **PostgreSQL** on port **5433** (user: `connections`, password: `connections`, db: `connections`)
 - **Redis** on port 6379
-
-> **Note**: Postgres runs on port 5433 (not the default 5432) to avoid conflicts.
 
 ### 2. Set Up Python Environment
 
@@ -69,7 +82,7 @@ The API is now available at http://localhost:8000
 # Health check
 curl http://localhost:8000/health
 
-# Build profile index (requires profile photos in ~/Connections/phase2-engine/data/profiles/)
+# Build profile index (uses data/profiles/)
 curl -X POST http://localhost:8000/admin/rebuild-profile-index
 
 # Ingest photos from uploads/ folder
@@ -77,12 +90,6 @@ curl -X POST http://localhost:8000/ingest/folder
 
 # Get graph summary
 curl http://localhost:8000/graph/summary
-
-# Get neighbors of a person
-curl "http://localhost:8000/graph/neighbors?person=Joe%20Biden"
-
-# Get ego network (2-hop neighborhood)
-curl "http://localhost:8000/graph/ego?person=Joe%20Biden&depth=2"
 ```
 
 ## Demo Flow
@@ -92,69 +99,9 @@ For a quick demo, use the included script:
 ```bash
 cd ~/Connections/connections-social
 
-# Put 6-10 multi-person images in demo_uploads/
-# Then run:
+# Syncs images from demo_uploads/ to uploads/ and runs the full pipeline
 ./scripts/demo.sh --sync-demo
 ```
-
-The `--sync-demo` flag copies images from `demo_uploads/` to `uploads/` before ingestion.
-
-Without images, the script still runs and shows the API responses (with `processed: 0`).
-
-### Demo Reset
-
-**Important:** `POST /admin/rebuild-profile-index` now clears ingestion history (`processed_images`, `uploads`, `faces`) in addition to persons. This means `POST /ingest/folder` will re-process all images after a rebuild.
-
-To reset just the graph/ingestion state (without rebuilding profiles):
-
-```bash
-# Reset demo state (keeps persons/profiles, clears graph + ingestion history)
-curl -X POST http://localhost:8000/admin/reset-demo
-
-# Then re-ingest
-curl -X POST http://localhost:8000/ingest/folder
-```
-
-To force re-processing without any reset:
-
-```bash
-# Force re-process all images (ignores processed_images)
-curl -X POST "http://localhost:8000/ingest/folder?force=true"
-```
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | API info and endpoint list |
-| `/health` | GET | Health check with database status |
-| `/admin/rebuild-profile-index` | POST | Rebuild person index from profile photos (clears all ingestion state) |
-| `/admin/reset-demo` | POST | Reset graph + ingestion state (keeps profiles) |
-| `/ingest/upload` | POST | Upload and process a single image |
-| `/ingest/folder` | POST | Process all images in `uploads/` folder |
-| `/graph/summary` | GET | Graph statistics and top edges |
-| `/graph/neighbors` | GET | Get neighbors of a person |
-| `/graph/ego` | GET | Get ego network (multi-hop neighborhood) |
-
-### Query Parameters
-
-**Ingest endpoints** support:
-- `force=true` - Re-process images even if already processed (bypasses `processed_images` check)
-
-**Graph endpoints** support:
-- `include_unknown=true|false` - Include/exclude UNKNOWN_* persons (default: true)
-- `limit=N` - Limit number of results
-
-## Demo Images
-
-Place 6-10 multi-person images in `demo_uploads/`:
-
-```bash
-# Example: copy some test images
-cp /path/to/group-photos/*.jpg demo_uploads/
-```
-
-The demo script will sync these to `uploads/` when you run `./scripts/demo.sh --sync-demo`.
 
 ## Configuration
 
@@ -163,33 +110,7 @@ Environment variables (with defaults):
 ```bash
 DATABASE_URL=postgresql://connections:connections@localhost:5433/connections
 REDIS_URL=redis://localhost:6379/0
-PROFILES_DIR=~/Connections/phase2-engine/data/profiles
-UPLOADS_DIR=~/Connections/connections-social/uploads
+PROFILES_DIR=./data/profiles  # Relative to project root
+UPLOADS_DIR=./uploads         # Relative to project root
 INSIGHTFACE_MODEL=buffalo_l
-```
-
-## Database Schema
-
-| Table | Purpose |
-|-------|---------|
-| `persons` | Known identities (name, created_at) |
-| `person_profiles` | Face embeddings for each person |
-| `uploads` | Processed images |
-| `faces` | Detected faces with match results |
-| `edges` | Connections between persons (weighted) |
-| `edge_evidence` | Photos proving each connection |
-| `processed_images` | Idempotency tracking for ingestion |
-
-## Development
-
-```bash
-# View docker logs
-docker compose logs -f
-
-# Reset database (loses all data)
-docker compose down -v
-docker compose up -d
-
-# Stop services
-docker compose down
 ```
