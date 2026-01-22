@@ -74,6 +74,9 @@ export default function ExplorePage() {
   // Person suggestions
   const [personSuggestions, setPersonSuggestions] = useState<string[]>([])
 
+  // Advanced options panel
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
   useEffect(() => {
     // Fetch person list for autocomplete
     const fetchPersons = async () => {
@@ -183,7 +186,7 @@ export default function ExplorePage() {
     window.open(`http://localhost:8000/images/${filename}`, '_blank')
   }
 
-  // Compute BFS distances from ego center
+  // Compute BFS distances from ego center (0-indexed internally: center=0, neighbors=1, etc.)
   const computeDistances = (center: string, edges: Array<{ source: string; target: string }>) => {
     const distances: Record<string, number> = { [center]: 0 }
     const queue: string[] = [center]
@@ -212,14 +215,51 @@ export default function ExplorePage() {
     return distances
   }
 
-  // Get edge distance (min of the two node distances)
+  /**
+   * Get edge display distance (1-based for human readability).
+   * Distance = 1 means direct neighbors of center.
+   *
+   * The displayed distance is: min(nodeDistance(a), nodeDistance(b)) + 1
+   * This way, an edge from center (dist=0) to neighbor (dist=1) shows Distance=1.
+   */
   const getEdgeDistance = (distances: Record<string, number>, source: string, target: string) => {
     const d1 = distances[source]
     const d2 = distances[target]
     if (d1 === undefined && d2 === undefined) return undefined
-    if (d1 === undefined) return d2
-    if (d2 === undefined) return d1
-    return Math.min(d1, d2)
+    const minDist = d1 === undefined ? d2 : d2 === undefined ? d1 : Math.min(d1, d2)
+    // 1-based: add 1 so center-neighbor edges show Distance=1, not 0
+    return minDist + 1
+  }
+
+  /**
+   * Normalize edge for display: Person A should be closer to center (or the center itself).
+   * If both have same distance, use alphabetical order.
+   */
+  const normalizeEdge = (
+    distances: Record<string, number>,
+    center: string,
+    source: string,
+    target: string,
+    weight: number
+  ) => {
+    const d1 = distances[source] ?? Infinity
+    const d2 = distances[target] ?? Infinity
+
+    // Person A should be the one closer to center
+    let personA = source
+    let personB = target
+
+    if (d2 < d1 || (d2 === d1 && target < source)) {
+      personA = target
+      personB = source
+    }
+
+    // If center is in the edge, it should always be Person A
+    if (personB === center) {
+      [personA, personB] = [personB, personA]
+    }
+
+    return { person_a: personA, person_b: personB, weight }
   }
 
   const anyLoading = loading.neighbors || loading.ego || loading.path
@@ -269,18 +309,45 @@ export default function ExplorePage() {
               <option value={3}>3</option>
             </select>
           </div>
+        </div>
 
-          <div className="toggle-container" style={{ paddingBottom: '0.25rem' }}>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={includeUnknown}
-                onChange={(e) => setIncludeUnknown(e.target.checked)}
-              />
-              <span className="toggle-slider" />
-            </label>
-            <span className="toggle-label">Include Unknown Faces</span>
-          </div>
+        {/* Advanced Options (collapsible) */}
+        <div style={{ marginTop: '0.75rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontSize: '0.8rem',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.25rem'
+            }}
+          >
+            <span style={{ transform: showAdvanced ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+              ▶
+            </span>
+            Advanced
+          </button>
+          {showAdvanced && (
+            <div style={{ marginTop: '0.5rem', paddingLeft: '1rem' }}>
+              <div className="toggle-container" style={{ paddingBottom: '0.25rem' }}>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={includeUnknown}
+                    onChange={(e) => setIncludeUnknown(e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+                <span className="toggle-label">Include Unknown Faces</span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="btn-group" style={{ marginTop: '1rem' }}>
@@ -459,14 +526,28 @@ export default function ExplorePage() {
               {/* Transform edges for EdgesTable with distances */}
               {(() => {
                 const distances = computeDistances(ego.center, ego.edges)
+                // Normalize and add distance to each edge
+                const edgesWithDistance = ego.edges.map(e => {
+                  const normalized = normalizeEdge(distances, ego.center, e.source, e.target, e.weight)
+                  return {
+                    ...normalized,
+                    distance: getEdgeDistance(distances, e.source, e.target)
+                  }
+                })
+                // Sort: ascending distance, descending weight, alphabetical Person B
+                edgesWithDistance.sort((a, b) => {
+                  // 1. Ascending distance
+                  const distA = a.distance ?? Infinity
+                  const distB = b.distance ?? Infinity
+                  if (distA !== distB) return distA - distB
+                  // 2. Descending weight
+                  if (a.weight !== b.weight) return b.weight - a.weight
+                  // 3. Alphabetical Person B
+                  return a.person_b.localeCompare(b.person_b)
+                })
                 return (
                   <EdgesTable
-                    edges={ego.edges.map(e => ({
-                      person_a: e.source,
-                      person_b: e.target,
-                      weight: e.weight,
-                      distance: getEdgeDistance(distances, e.source, e.target)
-                    }))}
+                    edges={edgesWithDistance}
                     title="Edges"
                     onPersonClick={handlePersonClick}
                     showDistance

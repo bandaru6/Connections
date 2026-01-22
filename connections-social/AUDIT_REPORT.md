@@ -1,12 +1,12 @@
 # Audit Report: Connections Social
 
 ## A. Profile Images (Identity Source)
-*   **Location:** The system currently looks for profile images in `~/Connections/phase2-engine/data/profiles` (defined in `backend/app/config.py`).
-*   **Status:** This path is **outside** the `connections-social` repository, which violates the "self-contained" goal. The local `data/` directory exists but is likely unused or empty.
+*   **Location:** The system looks for profile images in `data/profiles/` (defined in `backend/app/config.py`).
+*   **Status:** ✅ Self-contained within the repository.
 *   **Usage:** The `/admin/rebuild-profile-index` endpoint scans this directory. It expects a structure like `profiles/<Person Name>/*.jpg`. It takes the first valid face found in each folder to build the reference embedding for that person.
 
 ## B. Group Photos (Ingestion Source)
-*   **Location:** Group photos are ingested from `~/Connections/connections-social/uploads` (defined in `backend/app/config.py`).
+*   **Location:** Group photos are ingested from `uploads/` (defined in `backend/app/config.py`).
 *   **Ingestion Logic:**
     *   The `/ingest/folder` endpoint iterates through all images in this directory.
     *   The `/ingest/upload` endpoint saves uploaded files to this directory before processing.

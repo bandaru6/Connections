@@ -40,6 +40,7 @@ type LoadingState = {
   summary: boolean
   upload: boolean
   createProfile: boolean
+  runDemo: boolean
 }
 
 export default function Dashboard() {
@@ -59,7 +60,11 @@ export default function Dashboard() {
     summary: false,
     upload: false,
     createProfile: false,
+    runDemo: false,
   })
+
+  // Advanced admin options
+  const [showAdminAdvanced, setShowAdminAdvanced] = useState(false)
 
   // Upload state
   const [uploadFiles, setUploadFiles] = useState<FileList | null>(null)
@@ -187,6 +192,45 @@ export default function Dashboard() {
     }
     updateTimestamp()
     setLoading((s) => ({ ...s, ingest: false }))
+  }
+
+  const handleRunDemo = async () => {
+    const startTime = Date.now()
+    setLoading((s) => ({ ...s, runDemo: true }))
+    setError(null)
+    setLastAction({ name: 'Run Demo', status: 'pending' })
+
+    // Step 1: Reset
+    const resetRes = await api.post('/admin/reset-demo')
+    if (resetRes.error) {
+      const duration = Date.now() - startTime
+      setError(resetRes.error)
+      setLastResponse({ error: resetRes.error })
+      setLastAction({ name: 'Run Demo', status: 'error', duration, result: `Reset failed: ${resetRes.error}` })
+      setLoading((s) => ({ ...s, runDemo: false }))
+      return
+    }
+
+    // Step 2: Ingest
+    const ingestRes = await api.post('/ingest/folder')
+    const duration = Date.now() - startTime
+    setLastResponse(ingestRes.data || { error: ingestRes.error })
+
+    if (ingestRes.error) {
+      setError(ingestRes.error)
+      setLastAction({ name: 'Run Demo', status: 'error', duration, result: `Ingest failed: ${ingestRes.error}` })
+    } else {
+      const data = ingestRes.data as { processed?: number; total_edges_created?: number }
+      setLastAction({
+        name: 'Run Demo',
+        status: 'success',
+        duration,
+        result: `Reset + Ingested ${data.processed} images, ${data.total_edges_created} edges`
+      })
+      await autoRefresh()
+    }
+    updateTimestamp()
+    setLoading((s) => ({ ...s, runDemo: false }))
   }
 
   const handleUpload = async () => {
@@ -403,54 +447,99 @@ export default function Dashboard() {
       <div className="card">
         <div className="card-title" style={{ marginBottom: '0.5rem' }}>Admin Actions</div>
         <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-          Manage the system state. Use these to reset the demo or re-process images.
+          Manage the system state. Click "Run Demo" to reset and ingest images.
         </p>
-        <div className="btn-group">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-            <button className="btn btn-primary" onClick={handleRebuild} disabled={anyLoading}>
-              {loading.rebuild && <span className="spinner" />}
-              Rebuild Profile Index
-            </button>
-            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-              Rescans data/profiles. <strong>Destructive!</strong>
-            </span>
-          </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-            <button className="btn btn-secondary" onClick={handleReset} disabled={anyLoading}>
-              {loading.reset && <span className="spinner" />}
-              Reset Demo
-            </button>
-            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-              Clears graph & uploads. Keeps profiles.
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-            <button className="btn btn-primary" onClick={handleIngest} disabled={anyLoading}>
-              {loading.ingest && <span className="spinner" />}
-              Ingest Processed Photos
-            </button>
-            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-              Processes images in uploads/ folder.
-            </span>
-          </div>
+        {/* Primary Demo Action */}
+        <div style={{ marginBottom: '1rem' }}>
+          <button
+            className="btn btn-primary"
+            onClick={handleRunDemo}
+            disabled={anyLoading}
+            style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
+          >
+            {loading.runDemo && <span className="spinner" />}
+            Run Demo
+          </button>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginLeft: '0.75rem' }}>
+            Resets graph and ingests all photos from uploads/
+          </span>
         </div>
-        <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
-          <div className="toggle-container">
-            <label className="toggle">
-              <input type="checkbox" checked={forceIngest} onChange={(e) => setForceIngest(e.target.checked)} />
-              <span className="toggle-slider" />
-            </label>
-            <span className="toggle-label">Force Ingest (Ignore history)</span>
-          </div>
-          <div className="toggle-container">
-            <label className="toggle">
-              <input type="checkbox" checked={includeUnknown} onChange={(e) => setIncludeUnknown(e.target.checked)} />
-              <span className="toggle-slider" />
-            </label>
-            <span className="toggle-label">Show Unknown Faces in Graph</span>
-          </div>
+
+        {/* Advanced Admin Options (collapsible) */}
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowAdminAdvanced(!showAdminAdvanced)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontSize: '0.8rem',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.25rem'
+            }}
+          >
+            <span style={{ transform: showAdminAdvanced ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+              ▶
+            </span>
+            Advanced Actions
+          </button>
+          {showAdminAdvanced && (
+            <div style={{ marginTop: '0.75rem', paddingLeft: '1rem' }}>
+              <div className="btn-group" style={{ marginBottom: '1rem' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <button className="btn btn-primary" onClick={handleRebuild} disabled={anyLoading}>
+                    {loading.rebuild && <span className="spinner" />}
+                    Rebuild Profile Index
+                  </button>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                    Rescans data/profiles. <strong>Destructive!</strong>
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <button className="btn btn-secondary" onClick={handleReset} disabled={anyLoading}>
+                    {loading.reset && <span className="spinner" />}
+                    Reset Demo
+                  </button>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                    Clears graph only. Keeps profiles.
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <button className="btn btn-primary" onClick={handleIngest} disabled={anyLoading}>
+                    {loading.ingest && <span className="spinner" />}
+                    Ingest Photos
+                  </button>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                    Processes images in uploads/.
+                  </span>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '2rem' }}>
+                <div className="toggle-container">
+                  <label className="toggle">
+                    <input type="checkbox" checked={forceIngest} onChange={(e) => setForceIngest(e.target.checked)} />
+                    <span className="toggle-slider" />
+                  </label>
+                  <span className="toggle-label">Force Ingest (Ignore history)</span>
+                </div>
+                <div className="toggle-container">
+                  <label className="toggle">
+                    <input type="checkbox" checked={includeUnknown} onChange={(e) => setIncludeUnknown(e.target.checked)} />
+                    <span className="toggle-slider" />
+                  </label>
+                  <span className="toggle-label">Show Unknown Faces in Graph</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

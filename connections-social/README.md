@@ -25,6 +25,25 @@ Group Photos → Face Detection → Identity Matching → Edge Creation
 3. **Create Edges**: Every pair of people in a photo creates/updates an edge with weight and evidence
 4. **Query Graph**: Explore connections via REST APIs
 
+## Unknown Person Lifecycle
+
+When ingesting photos, faces that don't match any known profile are assigned auto-generated identities:
+
+1. **Detection**: InsightFace detects all faces in a group photo
+2. **Matching**: Each face embedding is compared against all known profiles using cosine similarity
+3. **Threshold Check**: If the best match score is < 0.45 (or fails the 0.05 margin check), the face is marked as unknown
+4. **Identity Assignment**: Unknown faces get sequential IDs like `UNKNOWN_0001`, `UNKNOWN_0002`, etc.
+5. **Graph Integration**: Unknown persons become permanent nodes and can have edges to other people
+
+**Why Unknown Persons Grow**: Every unmatched face in every photo becomes a distinct identity. This explains why `persons_total` exceeds the number of profile folders.
+
+**Filtering Unknown Faces**:
+- All graph APIs support `include_unknown=false` (the default) to filter out unknown persons
+- The UI has an "Advanced" section with a toggle to include/exclude unknowns
+- The graph summary shows `known_persons_total` and `edges_known_only_total` separately
+
+**Cleaning Up Unknowns**: Use `/admin/reset-demo` to clear all edges and unknowns while keeping profiles, or `/admin/rebuild-profile-index` for a complete reset.
+
 ## File Structure & Image Locations
 
 The system is self-contained. Here is where images live:
@@ -45,7 +64,7 @@ The system is self-contained. Here is where images live:
 ### 1. Start Database Services
 
 ```bash
-cd ~/Connections/connections-social
+cd connections-social  # or wherever you cloned the repo
 docker compose up -d
 ```
 
@@ -56,7 +75,7 @@ This starts:
 ### 2. Set Up Python Environment
 
 ```bash
-cd ~/Connections/connections-social/backend
+cd connections-social  # or wherever you cloned the repo/backend
 
 # Create virtual environment
 python -m venv venv
@@ -69,7 +88,7 @@ pip install -r requirements.txt
 ### 3. Run the Backend
 
 ```bash
-cd ~/Connections/connections-social/backend
+cd connections-social  # or wherever you cloned the repo/backend
 source venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
@@ -97,7 +116,7 @@ curl http://localhost:8000/graph/summary
 For a quick demo, use the included script:
 
 ```bash
-cd ~/Connections/connections-social
+cd connections-social  # or wherever you cloned the repo
 
 # Syncs images from demo_uploads/ to uploads/ and runs the full pipeline
 ./scripts/demo.sh --sync-demo

@@ -72,7 +72,9 @@ export default function NetworkGraph({ center, nodes, edges, onNodeClick }: Netw
           max: 5,
         },
         smooth: {
+          enabled: true,
           type: 'continuous',
+          roundness: 0.5,
         },
       },
       physics: {

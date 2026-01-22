@@ -7,12 +7,11 @@ A minimal Next.js frontend for the Connections Social API.
 ### 1. Start the Backend Services
 
 ```bash
-# Terminal 1: Start Docker (Postgres + Redis)
-cd ~/Connections/connections-social
+# Terminal 1: Start Docker (Postgres)
 docker compose up -d
 
 # Terminal 2: Start FastAPI backend
-cd ~/Connections/connections-social/backend
+cd backend
 source venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
@@ -21,7 +20,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 # Terminal 3: Start Next.js frontend
-cd ~/Connections/connections-social/frontend
+cd frontend
 npm install
 npm run dev
 ```
@@ -40,8 +39,8 @@ Open **http://localhost:3000** in your browser.
 ## Demo Flow
 
 1. Go to **Dashboard** (http://localhost:3000)
-2. Click **Rebuild Profile Index** to index known faces from `~/Connections/phase2-engine/data/profiles`
-3. Click **Ingest Folder** to process photos from `~/Connections/connections-social/uploads`
+2. Click **Rebuild Profile Index** to index known faces from `data/profiles/`
+3. Click **Ingest Folder** to process photos from `uploads/`
 4. Click **Refresh Summary** to see graph stats
 5. Go to **Explore** and enter a person name (e.g., "Barack Obama")
 6. Click **Get Neighbors** or **Get Ego Network**
