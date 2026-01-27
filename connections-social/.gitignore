@@ -1,8 +1,11 @@
 # Uploads and local data (large image folders)
 uploads/
 data/group_photos/
-data/profiles/
+# data/profiles/ - NOW TRACKED (contains reference face images)
 *.db
+
+# Backups (contain large binary embeddings)
+backups/
 
 # Python
 __pycache__/
