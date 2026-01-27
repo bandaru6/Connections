@@ -1,135 +1,189 @@
 # Connections Social
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+
 Build a social graph from photos using face recognition. Upload group photos, and the system automatically detects faces, matches them to known identities, and builds a weighted relationship graph based on co-appearances.
 
-## What This Is
+<p align="center">
+  <img src="assets/demo-screenshot.png" alt="Demo Screenshot" width="800">
+</p>
 
-Connections Social is a backend API that:
-- **Indexes known people** from a directory of profile photos (one face per photo)
-- **Ingests group photos** to detect and match faces
-- **Builds a social graph** where edges represent co-appearances in photos
-- **Provides graph queries** to explore connections between people
+## Features
+
+- **Face Detection & Recognition** — InsightFace (buffalo_l) for accurate face detection and 512-dimensional embeddings
+- **Identity Matching** — Cosine similarity matching against known profiles with configurable thresholds
+- **Social Graph Construction** — Weighted edges based on co-appearances with photo evidence
+- **Graph Queries** — Neighbors, ego networks, shortest paths between people
+- **Interactive UI** — Next.js dashboard with vis-network graph visualization
+
+## Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose
+- Make (optional, for convenience commands)
+
+### One Command
+
+```bash
+git clone https://github.com/bandaru6/Connections.git
+cd Connections/connections-social
+make demo
+```
+
+That's it! Once services are healthy:
+- **Frontend**: http://localhost:3000
+- **Backend API**: http://localhost:8000
+- **API Docs**: http://localhost:8000/docs
+
+## Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Next.js   │────▶│   FastAPI   │────▶│ InsightFace │
+│   :3000     │     │   :8000     │     │  (buffalo_l)│
+└─────────────┘     └──────┬──────┘     └─────────────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        ┌─────▼─────┐ ┌────▼────┐      │
+        │ PostgreSQL│ │  Redis  │      │
+        │  :5433    │ │  :6379  │      │
+        └───────────┘ └─────────┘      │
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
+
+## Project Structure
+
+```
+connections-social/
+├── backend/              # FastAPI application
+│   ├── app/
+│   │   ├── main.py       # Entry point
+│   │   ├── config.py     # Configuration
+│   │   ├── db.py         # Database connection
+│   │   └── routes/       # API endpoints
+│   └── requirements.txt
+├── frontend/             # Next.js application
+│   ├── app/              # App router pages
+│   ├── components/       # React components
+│   └── lib/              # Utilities
+├── infra/                # Infrastructure
+│   ├── docker/
+│   │   └── init.sql      # Database schema
+│   └── docker-compose.yml
+├── scripts/              # Utility scripts
+│   ├── seed.sh           # Seed demo data
+│   ├── demo.sh           # Full demo setup
+│   └── repopulate_profiles.py
+├── data/                 # Data files
+│   ├── profiles/         # Reference face images (1 per person)
+│   └── demo_uploads/     # Demo group photos
+├── docs/                 # Documentation
+│   ├── ARCHITECTURE.md
+│   ├── API.md
+│   └── AUDIT_REPORT.md
+└── assets/               # Screenshots, diagrams
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `make demo` | Start everything + seed demo data |
+| `make up` | Start all services |
+| `make down` | Stop all services (preserves data) |
+| `make reset` | Wipe all data and restart fresh |
+| `make seed` | Rebuild profiles and ingest demo photos |
+| `make logs` | Tail logs from all services |
+| `make status` | Show service health status |
+| `make clean` | Remove all containers, images, and volumes |
+| `make dev` | Start only Postgres/Redis for local development |
+
+## Local Development
+
+For development without full Docker:
+
+```bash
+# Start databases only
+make dev
+
+# Terminal 1: Backend
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+
+# Terminal 2: Frontend
+cd frontend
+npm install
+npm run dev
+```
+
+## API Overview
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/admin/rebuild-profile-index` | POST | Rebuild face embeddings from profiles |
+| `/admin/reset-demo` | POST | Clear graph, keep profiles |
+| `/ingest/upload` | POST | Upload and process single image |
+| `/ingest/folder` | POST | Process all images in uploads/ |
+| `/graph/summary` | GET | Graph statistics |
+| `/graph/neighbors` | GET | Get person's connections |
+| `/graph/ego` | GET | Get ego network |
+| `/graph/path` | GET | Find shortest path |
+| `/profiles/list` | GET | List all profiles |
+| `/profiles/create` | POST | Create new profile |
+
+See [docs/API.md](docs/API.md) for full API reference.
 
 ## How It Works
 
+### 1. Profile Index
 ```
-Profile Photos → Face Embeddings → Person Index
-                                        ↓
-Group Photos → Face Detection → Identity Matching → Edge Creation
-                                                          ↓
-                                              Graph APIs (summary, neighbors, ego)
+data/profiles/Barack_Obama/*.jpg  →  InsightFace  →  512-dim embedding  →  PostgreSQL
 ```
 
-1. **Build Profile Index**: Scan profile photos, extract face embeddings with InsightFace, store in Postgres
-2. **Ingest Photos**: For each group photo, detect faces, match against known profiles, assign UNKNOWN IDs for unrecognized faces
-3. **Create Edges**: Every pair of people in a photo creates/updates an edge with weight and evidence
-4. **Query Graph**: Explore connections via REST APIs
-
-## Unknown Person Lifecycle
-
-When ingesting photos, faces that don't match any known profile are assigned auto-generated identities:
-
-1. **Detection**: InsightFace detects all faces in a group photo
-2. **Matching**: Each face embedding is compared against all known profiles using cosine similarity
-3. **Threshold Check**: If the best match score is < 0.45 (or fails the 0.05 margin check), the face is marked as unknown
-4. **Identity Assignment**: Unknown faces get sequential IDs like `UNKNOWN_0001`, `UNKNOWN_0002`, etc.
-5. **Graph Integration**: Unknown persons become permanent nodes and can have edges to other people
-
-**Why Unknown Persons Grow**: Every unmatched face in every photo becomes a distinct identity. This explains why `persons_total` exceeds the number of profile folders.
-
-**Filtering Unknown Faces**:
-- All graph APIs support `include_unknown=false` (the default) to filter out unknown persons
-- The UI has an "Advanced" section with a toggle to include/exclude unknowns
-- The graph summary shows `known_persons_total` and `edges_known_only_total` separately
-
-**Cleaning Up Unknowns**: Use `/admin/reset-demo` to clear all edges and unknowns while keeping profiles, or `/admin/rebuild-profile-index` for a complete reset.
-
-## File Structure & Image Locations
-
-The system is self-contained. Here is where images live:
-
-*   **`data/profiles/`**: Source of truth for known identities.
-    *   Structure: `data/profiles/<Person Name>/<photo>.jpg`
-    *   Used by: `/admin/rebuild-profile-index`
-*   **`uploads/`**: The active ingestion folder.
-    *   Group photos uploaded via the UI or copied here are processed from this location.
-    *   Used by: `/ingest/folder` and `/ingest/upload`
-*   **`demo_uploads/`**: Backup of good demo images.
-    *   Use the demo script to copy these into `uploads/`.
-*   **`data/group_photos/`**: Optional dataset folder.
-    *   Can be used for batch processing large datasets (requires copying to `uploads/` currently).
-
-## Quickstart
-
-### 1. Start Database Services
-
-```bash
-cd connections-social  # or wherever you cloned the repo
-docker compose up -d
+### 2. Image Ingestion
+```
+uploads/group_photo.jpg  →  Detect faces  →  Match to profiles  →  Create edges
 ```
 
-This starts:
-- **PostgreSQL** on port **5433** (user: `connections`, password: `connections`, db: `connections`)
-- **Redis** on port 6379
-
-### 2. Set Up Python Environment
-
-```bash
-cd connections-social  # or wherever you cloned the repo/backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+### 3. Graph Query
 ```
-
-### 3. Run the Backend
-
-```bash
-cd connections-social  # or wherever you cloned the repo/backend
-source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-The API is now available at http://localhost:8000
-
-### 4. Verify Everything Works
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Build profile index (uses data/profiles/)
-curl -X POST http://localhost:8000/admin/rebuild-profile-index
-
-# Ingest photos from uploads/ folder
-curl -X POST http://localhost:8000/ingest/folder
-
-# Get graph summary
-curl http://localhost:8000/graph/summary
-```
-
-## Demo Flow
-
-For a quick demo, use the included script:
-
-```bash
-cd connections-social  # or wherever you cloned the repo
-
-# Syncs images from demo_uploads/ to uploads/ and runs the full pipeline
-./scripts/demo.sh --sync-demo
+GET /graph/ego?person=Barack Obama&depth=2  →  BFS traversal  →  Subgraph JSON
 ```
 
 ## Configuration
 
-Environment variables (with defaults):
+Copy `.env.example` to `.env` and customize:
 
 ```bash
+# Backend
 DATABASE_URL=postgresql://connections:connections@localhost:5433/connections
 REDIS_URL=redis://localhost:6379/0
-PROFILES_DIR=./data/profiles  # Relative to project root
-UPLOADS_DIR=./uploads         # Relative to project root
+PROFILES_DIR=./data/profiles
+UPLOADS_DIR=./uploads
 INSIGHTFACE_MODEL=buffalo_l
+
+# Frontend
+BACKEND_URL=http://localhost:8000
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+- [InsightFace](https://github.com/deepinsight/insightface) for face recognition
+- [vis-network](https://visjs.github.io/vis-network/docs/network/) for graph visualization

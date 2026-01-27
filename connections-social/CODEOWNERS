@@ -1,0 +1,18 @@
+# CODEOWNERS - Define who owns what code
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+* @bandaru6
+
+# Backend (FastAPI, Python)
+/backend/ @bandaru6
+
+# Frontend (Next.js, TypeScript)
+/frontend/ @bandaru6
+
+# Infrastructure (Docker, DB)
+/infra/ @bandaru6
+
+# Documentation
+/docs/ @bandaru6
+*.md @bandaru6
