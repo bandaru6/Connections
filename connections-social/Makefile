@@ -1,22 +1,23 @@
 # Connections Social - Makefile
 # Run `make help` to see available commands
 
-.PHONY: help demo up down reset seed logs status clean dev build test lint
+.PHONY: help demo up down reset seed logs status clean dev backend frontend run test lint
 
 # Default target
 help:
 	@echo "Connections Social - Available Commands"
 	@echo ""
-	@echo "  make demo      Start everything + seed demo data"
-	@echo "  make up        Start all services"
-	@echo "  make down      Stop all services (preserves data)"
+	@echo "  make demo      Start databases, backend, frontend + seed data"
+	@echo "  make run       Start databases + backend + frontend (no seed)"
+	@echo "  make dev       Start only Postgres/Redis (for local dev)"
+	@echo "  make backend   Start backend server (requires databases)"
+	@echo "  make frontend  Start frontend server"
+	@echo "  make seed      Rebuild profiles and ingest demo photos"
+	@echo "  make down      Stop database services"
 	@echo "  make reset     Wipe all data and restart fresh"
-	@echo "  make seed      Populate demo data"
-	@echo "  make logs      Tail logs from all services"
 	@echo "  make status    Show service health status"
+	@echo "  make logs      Tail database logs"
 	@echo "  make clean     Remove all containers, images, and volumes"
-	@echo "  make dev       Start only Postgres/Redis for local dev"
-	@echo "  make build     Build all Docker images"
 	@echo "  make test      Run tests"
 	@echo "  make lint      Run linters"
 	@echo ""
@@ -24,20 +25,47 @@ help:
 # Docker Compose file location
 DC := docker compose -f infra/docker-compose.yml
 
-# Start everything and seed data
-demo: up
-	@echo "Waiting for services to be healthy..."
+# Full demo: databases + backend + frontend + seed
+demo: dev
+	@echo ""
+	@echo "Starting backend..."
+	@cd backend && source venv/bin/activate 2>/dev/null && \
+		DATABASE_URL="postgresql://connections:connections@localhost:5433/connections" \
+		nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &
+	@echo "Starting frontend..."
+	@cd frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &
+	@echo "Waiting for services..."
 	@sleep 10
 	@$(MAKE) seed
-
-# Start all services
-up:
-	$(DC) up -d
 	@echo ""
-	@echo "Services starting..."
+	@echo "Demo ready!"
 	@echo "  Frontend: http://localhost:3000"
 	@echo "  Backend:  http://localhost:8000"
 	@echo "  API Docs: http://localhost:8000/docs"
+
+# Start all services without seeding
+run: dev
+	@echo ""
+	@echo "Starting backend..."
+	@cd backend && source venv/bin/activate 2>/dev/null && \
+		DATABASE_URL="postgresql://connections:connections@localhost:5433/connections" \
+		nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &
+	@echo "Starting frontend..."
+	@cd frontend && nohup npm run dev > /tmp/frontend.log 2>&1 &
+	@sleep 5
+	@echo ""
+	@echo "Services started:"
+	@echo "  Frontend: http://localhost:3000"
+	@echo "  Backend:  http://localhost:8000"
+	@echo "  API Docs: http://localhost:8000/docs"
+
+# Start only databases
+up:
+	$(DC) up -d
+	@echo ""
+	@echo "Databases started:"
+	@echo "  PostgreSQL: localhost:5433"
+	@echo "  Redis:      localhost:6379"
 
 # Stop services
 down:
@@ -83,13 +111,31 @@ dev:
 	@echo "Databases started:"
 	@echo "  PostgreSQL: localhost:5433"
 	@echo "  Redis:      localhost:6379"
-	@echo ""
-	@echo "Run backend:  cd backend && source venv/bin/activate && uvicorn app.main:app --reload"
-	@echo "Run frontend: cd frontend && npm run dev"
 
-# Build images
+# Start backend server
+backend:
+	@echo "Starting backend on http://localhost:8000..."
+	cd backend && source venv/bin/activate && \
+		DATABASE_URL="postgresql://connections:connections@localhost:5433/connections" \
+		uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Start frontend server
+frontend:
+	@echo "Starting frontend on http://localhost:3000..."
+	cd frontend && npm run dev
+
+# Stop backend and frontend
+stop:
+	@pkill -f "uvicorn app.main:app" 2>/dev/null || true
+	@pkill -f "next dev" 2>/dev/null || true
+	@echo "Stopped backend and frontend"
+
+# Build images (N/A for local dev)
 build:
-	$(DC) build
+	@echo "No Docker build needed - backend/frontend run locally"
+	@echo "To install dependencies:"
+	@echo "  Backend:  cd backend && pip install -r requirements.txt"
+	@echo "  Frontend: cd frontend && npm install"
 
 # Run tests
 test:
