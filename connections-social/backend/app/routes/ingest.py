@@ -3,6 +3,7 @@
 import json
 import logging
 import struct
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -13,9 +14,14 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import UPLOADS_DIR, INSIGHTFACE_MODEL
 from app.db import get_cursor
+from app.observability.tracing import create_span, trace_function
+from app.circuit_breaker import insightface_breaker, CircuitBreakerOpen
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Current model version for data lineage tracking
+MODEL_VERSION = INSIGHTFACE_MODEL
 
 # Face matching thresholds
 MIN_MATCH_SCORE = 0.45
@@ -152,28 +158,35 @@ def match_face_to_person(
     Returns (person_name, best_score, second_best_score).
     Returns (None, 0, 0) if no profiles available.
     """
-    if not profiles:
-        return None, 0.0, 0.0
+    with create_span("face_matching", {"profile_count": len(profiles)}) as span:
+        if not profiles:
+            span.set_attribute("match_result", "no_profiles")
+            return None, 0.0, 0.0
 
-    # Compute similarities to all profiles
-    scores_by_person: Dict[str, float] = {}
+        # Compute similarities to all profiles
+        scores_by_person: Dict[str, float] = {}
 
-    for person_id, person_name, profile_emb in profiles:
-        sim = cosine_similarity(face_embedding, profile_emb)
-        # Keep max score per person (a person may have multiple profiles)
-        if person_name not in scores_by_person or sim > scores_by_person[person_name]:
-            scores_by_person[person_name] = sim
+        for person_id, person_name, profile_emb in profiles:
+            sim = cosine_similarity(face_embedding, profile_emb)
+            # Keep max score per person (a person may have multiple profiles)
+            if person_name not in scores_by_person or sim > scores_by_person[person_name]:
+                scores_by_person[person_name] = sim
 
-    if not scores_by_person:
-        return None, 0.0, 0.0
+        if not scores_by_person:
+            span.set_attribute("match_result", "no_scores")
+            return None, 0.0, 0.0
 
-    # Sort by score descending
-    sorted_scores = sorted(scores_by_person.items(), key=lambda x: x[1], reverse=True)
+        # Sort by score descending
+        sorted_scores = sorted(scores_by_person.items(), key=lambda x: x[1], reverse=True)
 
-    best_name, best_score = sorted_scores[0]
-    second_best_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
+        best_name, best_score = sorted_scores[0]
+        second_best_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
 
-    return best_name, best_score, second_best_score
+        span.set_attribute("best_match", best_name)
+        span.set_attribute("best_score", best_score)
+        span.set_attribute("margin", best_score - second_best_score)
+
+        return best_name, best_score, second_best_score
 
 
 def detect_faces(image_path: Path) -> List[dict]:
@@ -181,33 +194,42 @@ def detect_faces(image_path: Path) -> List[dict]:
 
     Returns list of face dicts sorted left-to-right by bounding box x-coordinate.
     Each dict has: bbox, embedding
+
+    Raises:
+        CircuitBreakerOpen: If ML inference is temporarily unavailable
+        ValueError: If image cannot be read
     """
-    img = cv2.imread(str(image_path))
-    if img is None:
-        raise ValueError(f"Failed to read image: {image_path}")
+    with create_span("face_detection", {"image": str(image_path.name)}) as span:
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise ValueError(f"Failed to read image: {image_path}")
 
-    face_app = get_face_app()
-    faces = face_app.get(img)
+        face_app = get_face_app()
 
-    # Extract face data
-    face_data = []
-    for face in faces:
-        bbox = face.bbox.tolist()  # [x1, y1, x2, y2]
-        embedding = face.normed_embedding
-        face_data.append({
-            'bbox': bbox,
-            'embedding': embedding,
-            'x_center': (bbox[0] + bbox[2]) / 2  # For sorting left-to-right
-        })
+        # Use circuit breaker to protect against ML inference failures
+        with insightface_breaker.protect():
+            faces = face_app.get(img)
 
-    # Sort left-to-right by x-center
-    face_data.sort(key=lambda f: f['x_center'])
+        # Extract face data
+        face_data = []
+        for face in faces:
+            bbox = face.bbox.tolist()  # [x1, y1, x2, y2]
+            embedding = face.normed_embedding
+            face_data.append({
+                'bbox': bbox,
+                'embedding': embedding,
+                'x_center': (bbox[0] + bbox[2]) / 2  # For sorting left-to-right
+            })
 
-    # Remove temporary sorting key
-    for f in face_data:
-        del f['x_center']
+        # Sort left-to-right by x-center
+        face_data.sort(key=lambda f: f['x_center'])
 
-    return face_data
+        # Remove temporary sorting key
+        for f in face_data:
+            del f['x_center']
+
+        span.set_attribute("faces_detected", len(face_data))
+        return face_data
 
 
 def create_upload_record(cur, filename: str) -> str:
@@ -273,28 +295,57 @@ def upsert_edge(cur, person_a_id: str, person_b_id: str) -> Tuple[str, str, bool
     return person_a_id, person_b_id, True
 
 
-def store_edge_evidence(cur, person_a_id: str, person_b_id: str, upload_id: str):
-    """Store edge evidence."""
-    # Ensure ordered pair
+def store_edge_evidence(
+    cur,
+    person_a_id: str,
+    person_b_id: str,
+    upload_id: str,
+    confidence_a: float = None,
+    confidence_b: float = None,
+    model_version: str = None
+):
+    """Store edge evidence with data lineage tracking.
+
+    Args:
+        cur: Database cursor
+        person_a_id: UUID of first person
+        person_b_id: UUID of second person
+        upload_id: UUID of the upload that created this evidence
+        confidence_a: Match confidence score for person_a
+        confidence_b: Match confidence score for person_b
+        model_version: Version of ML model that produced the match
+    """
+    # Ensure ordered pair (swap confidences if we swap IDs)
     if person_a_id > person_b_id:
         person_a_id, person_b_id = person_b_id, person_a_id
+        confidence_a, confidence_b = confidence_b, confidence_a
 
     cur.execute(
         """
-        INSERT INTO edge_evidence (person_a_id, person_b_id, upload_id)
-        VALUES (%s, %s, %s)
+        INSERT INTO edge_evidence (
+            person_a_id, person_b_id, upload_id,
+            model_version, confidence_a, confidence_b, processed_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
-        (person_a_id, person_b_id, upload_id)
+        (
+            person_a_id, person_b_id, upload_id,
+            model_version or MODEL_VERSION,
+            confidence_a,
+            confidence_b,
+            datetime.now(timezone.utc)
+        )
     )
 
 
+@trace_function("process_image")
 def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, np.ndarray]]) -> dict:
     """Process a single image through the ingestion pipeline.
 
     Returns stats dict with: faces_detected, known_matches, unknown_faces, edges_created
     """
     filename = image_path.name
-    logger.info(f"Processing image: {filename}")
+    logger.info(f"Processing image: {filename} (model: {MODEL_VERSION})")
 
     # Detect faces
     try:
@@ -318,7 +369,8 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
     upload_id = create_upload_record(cur, filename)
 
     # Match faces to persons
-    face_identities = []  # List of (person_id, person_name, is_unknown)
+    # List of (person_id, person_name, is_unknown, confidence_score)
+    face_identities = []
     known_matches = 0
     unknown_faces = 0
 
@@ -336,6 +388,7 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
             # Known person match
             person_id = get_person_by_name(cur, person_name)
             is_unknown = False
+            confidence = best_score
             known_matches += 1
             logger.info(f"  Face {i+1}: Matched to {person_name} (score={best_score:.3f}, margin={margin:.3f})")
         else:
@@ -344,6 +397,7 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
             person_id = create_unknown_person(cur, unknown_id)
             person_name = unknown_id
             is_unknown = True
+            confidence = 0.0
             unknown_faces += 1
             if person_name is not None:
                 logger.info(f"  Face {i+1}: UNKNOWN (best={best_score:.3f} to {person_name}, margin={margin:.3f})")
@@ -352,15 +406,21 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
 
         # Store face
         store_face(cur, upload_id, face, person_id, best_score if not is_unknown else 0.0)
-        face_identities.append((person_id, person_name, is_unknown))
+        face_identities.append((person_id, person_name, is_unknown, confidence))
 
-    # Create edges for all pairs
+    # Create edges for all pairs with data lineage tracking
     edges_created = 0
 
     if len(face_identities) >= 2:
-        for (id_a, name_a, _), (id_b, name_b, _) in combinations(face_identities, 2):
+        for (id_a, name_a, _, conf_a), (id_b, name_b, _, conf_b) in combinations(face_identities, 2):
             a_id, b_id, is_new = upsert_edge(cur, id_a, id_b)
-            store_edge_evidence(cur, a_id, b_id, upload_id)
+            # Store edge evidence with lineage (model version, confidence scores)
+            store_edge_evidence(
+                cur, a_id, b_id, upload_id,
+                confidence_a=conf_a,
+                confidence_b=conf_b,
+                model_version=MODEL_VERSION
+            )
             if is_new:
                 edges_created += 1
             logger.info(f"  Edge: {name_a} <-> {name_b} ({'new' if is_new else 'updated'})")
@@ -441,9 +501,51 @@ async def ingest_upload(image: UploadFile = File(...), force: bool = False):
 
     except HTTPException:
         raise
+    except CircuitBreakerOpen as e:
+        logger.warning(f"ML inference unavailable: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="ML inference temporarily unavailable. Please retry later."
+        )
     except Exception as e:
         logger.error(f"Ingestion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
+
+
+@router.get("/circuit-breaker/status")
+def get_circuit_breaker_status():
+    """Get the status of the ML inference circuit breaker.
+
+    Returns current state, failure counts, and timing information.
+    Useful for monitoring and debugging inference availability.
+    """
+    stats = insightface_breaker.stats
+    return {
+        "name": insightface_breaker.name,
+        "state": stats.state.value,
+        "failures": stats.failures,
+        "successes": stats.successes,
+        "total_rejected": stats.total_rejected,
+        "last_failure_time": stats.last_failure_time,
+        "last_success_time": stats.last_success_time,
+        "opened_at": stats.opened_at,
+        "config": {
+            "failure_threshold": insightface_breaker.config.failure_threshold,
+            "failure_window_seconds": insightface_breaker.config.failure_window,
+            "recovery_timeout_seconds": insightface_breaker.config.recovery_timeout
+        }
+    }
+
+
+@router.post("/circuit-breaker/reset")
+def reset_circuit_breaker():
+    """Manually reset the ML inference circuit breaker.
+
+    Use this to force the circuit breaker back to closed state
+    after resolving underlying issues.
+    """
+    insightface_breaker.reset()
+    return {"status": "reset", "state": insightface_breaker.state.value}
 
 
 @router.post("/folder")
@@ -552,3 +654,191 @@ def ingest_folder(force: bool = False):
     except Exception as e:
         logger.error(f"Batch ingestion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Batch ingestion failed: {e}")
+
+
+# ============================================================================
+# Async Batch Ingestion with Job Status
+# ============================================================================
+
+from app.jobs import job_manager, JobStatus
+
+
+def _process_batch_job(job_id: str, jm, force: bool = False):
+    """Background worker function for batch ingestion.
+
+    This runs in a separate thread and updates job progress as it processes.
+    """
+    from app.db import get_cursor
+
+    # Get image files
+    image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
+    image_files = sorted([
+        f for f in UPLOADS_DIR.iterdir()
+        if f.is_file() and f.suffix.lower() in image_extensions
+    ])
+
+    total_images = len(image_files)
+    if total_images == 0:
+        jm.complete_job(
+            job_id,
+            success=True,
+            data={
+                'total_images': 0,
+                'processed': 0,
+                'skipped': 0,
+                'total_faces_detected': 0,
+                'total_known_matches': 0,
+                'total_unknown_faces': 0,
+                'total_edges_created': 0,
+            },
+            items=[]
+        )
+        return
+
+    # Track stats
+    processed = 0
+    skipped = 0
+    total_faces = 0
+    total_known = 0
+    total_unknown = 0
+    total_edges = 0
+    results = []
+
+    try:
+        with get_cursor() as cur:
+            ensure_tables_exist(cur)
+            profiles = load_profile_embeddings(cur)
+
+            for idx, image_path in enumerate(image_files):
+                filename = image_path.name
+
+                # Update progress
+                jm.update_job_progress(
+                    job_id,
+                    current=idx + 1,
+                    total=total_images,
+                    current_item=filename,
+                    items_succeeded=processed,
+                    items_failed=len([r for r in results if 'error' in r])
+                )
+
+                # Check if already processed
+                if is_already_processed(cur, filename):
+                    if force:
+                        cur.execute(
+                            "DELETE FROM processed_images WHERE filename = %s",
+                            (filename,)
+                        )
+                    else:
+                        skipped += 1
+                        results.append({
+                            'filename': filename,
+                            'status': 'skipped',
+                            'reason': 'already_processed'
+                        })
+                        continue
+
+                try:
+                    stats = process_single_image(cur, image_path, profiles)
+                    processed += 1
+                    total_faces += stats['faces_detected']
+                    total_known += stats['known_matches']
+                    total_unknown += stats['unknown_faces']
+                    total_edges += stats['edges_created']
+                    results.append({
+                        'filename': filename,
+                        'status': 'success',
+                        **stats
+                    })
+                except CircuitBreakerOpen as e:
+                    results.append({
+                        'filename': filename,
+                        'status': 'failed',
+                        'error': 'ML inference temporarily unavailable'
+                    })
+                except Exception as e:
+                    results.append({
+                        'filename': filename,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+
+        # Complete the job
+        jm.complete_job(
+            job_id,
+            success=True,
+            data={
+                'total_images': total_images,
+                'processed': processed,
+                'skipped': skipped,
+                'total_faces_detected': total_faces,
+                'total_known_matches': total_known,
+                'total_unknown_faces': total_unknown,
+                'total_edges_created': total_edges,
+                'force_mode': force,
+            },
+            items=results
+        )
+
+    except Exception as e:
+        logger.error(f"Batch job {job_id} failed: {e}")
+        jm.complete_job(
+            job_id,
+            success=False,
+            error=str(e),
+            items=results
+        )
+
+
+@router.post("/batch")
+def ingest_batch_async(force: bool = False):
+    """Start async batch ingestion of all images in uploads folder.
+
+    Unlike /folder which blocks until completion, this endpoint returns
+    immediately with a job ID that can be polled for progress.
+
+    Query params:
+        force: If True, re-process all images regardless of processed state
+
+    Returns:
+        job_id: UUID to poll for status via GET /jobs/{job_id}
+        status: Initial job status (pending)
+        poll_url: URL to check job status
+
+    Example usage:
+        1. POST /ingest/batch → {"job_id": "abc-123", ...}
+        2. GET /jobs/abc-123 → {"status": "running", "progress": {...}}
+        3. GET /jobs/abc-123 → {"status": "completed", "result": {...}}
+    """
+    # Ensure uploads directory exists
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Count images for metadata
+    image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
+    image_count = len([
+        f for f in UPLOADS_DIR.iterdir()
+        if f.is_file() and f.suffix.lower() in image_extensions
+    ])
+
+    # Create job
+    job = job_manager.create_job(
+        job_type="batch_ingest",
+        metadata={
+            "image_count": image_count,
+            "force": force,
+            "model_version": MODEL_VERSION,
+        }
+    )
+
+    # Start processing in background
+    job_manager.run_async(
+        job.id,
+        lambda job_id, jm: _process_batch_job(job_id, jm, force=force)
+    )
+
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "poll_url": f"/jobs/{job.id}",
+        "metadata": job.metadata,
+    }

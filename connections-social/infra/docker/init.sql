@@ -58,18 +58,25 @@ CREATE TABLE edges (
 CREATE INDEX idx_edges_person_a ON edges(person_a_id);
 CREATE INDEX idx_edges_person_b ON edges(person_b_id);
 
--- Edge evidence: photos that prove an edge exists
+-- Edge evidence: photos that prove an edge exists (with data lineage tracking)
 CREATE TABLE edge_evidence (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     person_a_id UUID NOT NULL,
     person_b_id UUID NOT NULL,
     upload_id UUID NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+    -- Data lineage fields for tracking which model produced this edge
+    model_version TEXT NOT NULL DEFAULT 'buffalo_l',
+    confidence_a FLOAT,  -- Match confidence for person_a
+    confidence_b FLOAT,  -- Match confidence for person_b
+    processed_at TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     FOREIGN KEY (person_a_id, person_b_id) REFERENCES edges(person_a_id, person_b_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_edge_evidence_edge ON edge_evidence(person_a_id, person_b_id);
 CREATE INDEX idx_edge_evidence_upload ON edge_evidence(upload_id);
+CREATE INDEX idx_edge_evidence_model ON edge_evidence(model_version);
+CREATE INDEX idx_edge_evidence_processed ON edge_evidence(processed_at DESC);
 
 -- Processed images: tracks which images have been ingested (for idempotency)
 CREATE TABLE IF NOT EXISTS processed_images (

@@ -2,15 +2,17 @@
 
 import logging
 import struct
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.config import PROFILES_DIR, UPLOADS_DIR, BASE_DIR, INSIGHTFACE_MODEL
 from app.db import get_cursor
+from app.jobs import job_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -299,3 +301,381 @@ def storage_info():
         "group_photos_count": count_images(group_photos_dir),
         "base_dir": str(BASE_DIR)
     }
+
+
+# ============================================================================
+# Replay / Reprocessing Endpoint
+# ============================================================================
+
+@router.post("/replay")
+def replay_processing(
+    from_date: Optional[str] = Query(
+        None,
+        description="Start date for replay (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
+    ),
+    to_date: Optional[str] = Query(
+        None,
+        description="End date for replay (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
+    ),
+    model_version: Optional[str] = Query(
+        None,
+        description="Only replay images processed by this model version"
+    ),
+    async_mode: bool = Query(
+        False,
+        description="If True, run replay in background and return job ID"
+    ),
+):
+    """Replay/reprocess historical images with current model.
+
+    This endpoint allows reprocessing previously ingested images, which is useful when:
+    - ML model has been updated and you want to regenerate edges with new version
+    - You want to test different matching thresholds
+    - Data lineage tracking was added and you want to backfill
+
+    The replay process:
+    1. Finds images processed within the specified date range
+    2. Clears their entries from processed_images table
+    3. Clears associated graph data (edges, edge_evidence)
+    4. Re-runs the ingestion pipeline with current model
+
+    Args:
+        from_date: Optional start date (default: no lower bound)
+        to_date: Optional end date (default: no upper bound)
+        model_version: Optional filter by original model version
+        async_mode: If True, returns job ID for polling; if False, blocks until complete
+
+    Returns:
+        Replay statistics or job ID (if async_mode=True)
+
+    Example:
+        POST /admin/replay?from_date=2024-01-01&to_date=2024-01-31
+        POST /admin/replay?model_version=buffalo_l&async_mode=true
+    """
+    logger.info(f"Replay requested: from={from_date}, to={to_date}, model={model_version}")
+
+    # Parse dates if provided
+    parsed_from = None
+    parsed_to = None
+
+    if from_date:
+        try:
+            if 'T' in from_date:
+                parsed_from = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
+            else:
+                parsed_from = datetime.strptime(from_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid from_date format: {from_date}. Use YYYY-MM-DD or ISO format."
+            )
+
+    if to_date:
+        try:
+            if 'T' in to_date:
+                parsed_to = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
+            else:
+                parsed_to = datetime.strptime(to_date, '%Y-%m-%d').replace(
+                    hour=23, minute=59, second=59, tzinfo=timezone.utc
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid to_date format: {to_date}. Use YYYY-MM-DD or ISO format."
+            )
+
+    if async_mode:
+        # Create background job
+        job = job_manager.create_job(
+            job_type="replay",
+            metadata={
+                "from_date": from_date,
+                "to_date": to_date,
+                "model_version": model_version,
+                "current_model": INSIGHTFACE_MODEL,
+            }
+        )
+
+        job_manager.run_async(
+            job.id,
+            lambda jid, jm: _execute_replay(
+                jid, jm, parsed_from, parsed_to, model_version
+            )
+        )
+
+        return {
+            "job_id": job.id,
+            "status": "pending",
+            "poll_url": f"/jobs/{job.id}",
+            "message": "Replay job started in background"
+        }
+    else:
+        # Execute synchronously
+        return _execute_replay_sync(parsed_from, parsed_to, model_version)
+
+
+def _execute_replay_sync(
+    from_date: Optional[datetime],
+    to_date: Optional[datetime],
+    model_version: Optional[str]
+) -> dict:
+    """Execute replay synchronously and return results."""
+    from app.routes.ingest import (
+        ensure_tables_exist,
+        load_profile_embeddings,
+        process_single_image,
+        is_already_processed,
+        MODEL_VERSION,
+    )
+
+    try:
+        with get_cursor() as cur:
+            ensure_tables_exist(cur)
+
+            # Find images to replay based on criteria
+            query = """
+                SELECT DISTINCT pi.filename, pi.processed_at
+                FROM processed_images pi
+                WHERE 1=1
+            """
+            params = []
+
+            if from_date:
+                query += " AND pi.processed_at >= %s"
+                params.append(from_date)
+
+            if to_date:
+                query += " AND pi.processed_at <= %s"
+                params.append(to_date)
+
+            # If model_version filter specified, join with edge_evidence
+            if model_version:
+                query = """
+                    SELECT DISTINCT pi.filename, pi.processed_at
+                    FROM processed_images pi
+                    JOIN uploads u ON u.image_path = pi.filename
+                    JOIN edge_evidence ee ON ee.upload_id = u.id
+                    WHERE ee.model_version = %s
+                """
+                params = [model_version]
+                if from_date:
+                    query += " AND pi.processed_at >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND pi.processed_at <= %s"
+                    params.append(to_date)
+
+            query += " ORDER BY pi.processed_at"
+
+            cur.execute(query, params)
+            images_to_replay = cur.fetchall()
+
+            if not images_to_replay:
+                return {
+                    "status": "completed",
+                    "message": "No images found matching criteria",
+                    "images_found": 0,
+                    "images_replayed": 0,
+                }
+
+            # Clear processed status for these images
+            filenames = [row['filename'] for row in images_to_replay]
+            cur.execute(
+                "DELETE FROM processed_images WHERE filename = ANY(%s)",
+                (filenames,)
+            )
+            logger.info(f"Cleared {len(filenames)} images from processed_images")
+
+            # Load profiles and reprocess
+            profiles = load_profile_embeddings(cur)
+
+            replayed = 0
+            failed = 0
+            results = []
+
+            for row in images_to_replay:
+                filename = row['filename']
+                image_path = UPLOADS_DIR / filename
+
+                if not image_path.exists():
+                    results.append({
+                        'filename': filename,
+                        'status': 'skipped',
+                        'reason': 'file_not_found'
+                    })
+                    continue
+
+                try:
+                    stats = process_single_image(cur, image_path, profiles)
+                    replayed += 1
+                    results.append({
+                        'filename': filename,
+                        'status': 'success',
+                        'new_model': MODEL_VERSION,
+                        **stats
+                    })
+                except Exception as e:
+                    failed += 1
+                    results.append({
+                        'filename': filename,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+
+            return {
+                "status": "completed",
+                "images_found": len(images_to_replay),
+                "images_replayed": replayed,
+                "images_failed": failed,
+                "new_model_version": MODEL_VERSION,
+                "filters": {
+                    "from_date": from_date.isoformat() if from_date else None,
+                    "to_date": to_date.isoformat() if to_date else None,
+                    "original_model": model_version,
+                },
+                "results": results
+            }
+
+    except Exception as e:
+        logger.error(f"Replay failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Replay failed: {e}")
+
+
+def _execute_replay(
+    job_id: str,
+    jm,
+    from_date: Optional[datetime],
+    to_date: Optional[datetime],
+    model_version: Optional[str]
+):
+    """Execute replay as background job."""
+    from app.routes.ingest import (
+        ensure_tables_exist,
+        load_profile_embeddings,
+        process_single_image,
+        MODEL_VERSION,
+    )
+
+    try:
+        with get_cursor() as cur:
+            ensure_tables_exist(cur)
+
+            # Find images to replay
+            query = """
+                SELECT DISTINCT pi.filename, pi.processed_at
+                FROM processed_images pi
+                WHERE 1=1
+            """
+            params = []
+
+            if from_date:
+                query += " AND pi.processed_at >= %s"
+                params.append(from_date)
+
+            if to_date:
+                query += " AND pi.processed_at <= %s"
+                params.append(to_date)
+
+            if model_version:
+                query = """
+                    SELECT DISTINCT pi.filename, pi.processed_at
+                    FROM processed_images pi
+                    JOIN uploads u ON u.image_path = pi.filename
+                    JOIN edge_evidence ee ON ee.upload_id = u.id
+                    WHERE ee.model_version = %s
+                """
+                params = [model_version]
+                if from_date:
+                    query += " AND pi.processed_at >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND pi.processed_at <= %s"
+                    params.append(to_date)
+
+            query += " ORDER BY pi.processed_at"
+
+            cur.execute(query, params)
+            images_to_replay = cur.fetchall()
+
+            total = len(images_to_replay)
+
+            if total == 0:
+                jm.complete_job(
+                    job_id,
+                    success=True,
+                    data={
+                        "message": "No images found matching criteria",
+                        "images_found": 0,
+                        "images_replayed": 0,
+                    }
+                )
+                return
+
+            # Clear processed status
+            filenames = [row['filename'] for row in images_to_replay]
+            cur.execute(
+                "DELETE FROM processed_images WHERE filename = ANY(%s)",
+                (filenames,)
+            )
+
+            # Load profiles
+            profiles = load_profile_embeddings(cur)
+
+            replayed = 0
+            failed = 0
+            results = []
+
+            for idx, row in enumerate(images_to_replay):
+                filename = row['filename']
+
+                jm.update_job_progress(
+                    job_id,
+                    current=idx + 1,
+                    total=total,
+                    current_item=filename,
+                    items_succeeded=replayed,
+                    items_failed=failed
+                )
+
+                image_path = UPLOADS_DIR / filename
+
+                if not image_path.exists():
+                    results.append({
+                        'filename': filename,
+                        'status': 'skipped',
+                        'reason': 'file_not_found'
+                    })
+                    continue
+
+                try:
+                    stats = process_single_image(cur, image_path, profiles)
+                    replayed += 1
+                    results.append({
+                        'filename': filename,
+                        'status': 'success',
+                        'new_model': MODEL_VERSION,
+                        **stats
+                    })
+                except Exception as e:
+                    failed += 1
+                    results.append({
+                        'filename': filename,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+
+            jm.complete_job(
+                job_id,
+                success=True,
+                data={
+                    "images_found": total,
+                    "images_replayed": replayed,
+                    "images_failed": failed,
+                    "new_model_version": MODEL_VERSION,
+                },
+                items=results
+            )
+
+    except Exception as e:
+        logger.error(f"Replay job {job_id} failed: {e}")
+        jm.complete_job(job_id, success=False, error=str(e))
