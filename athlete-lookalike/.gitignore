@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+backend/venv/
+__pycache__/
+*.pyc
+
+# Data (large files)
+data/profiles/
+uploads/
+*.png
+*.jpg
+*.jpeg
+
+# Logs
+*.log
+/tmp/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Next.js
+.next/
+out/
+
+# Misc
+.DS_Store
+*.pem

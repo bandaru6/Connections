@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: athlete-lookalike-db
+    environment:
+      POSTGRES_USER: athlete
+      POSTGRES_PASSWORD: athlete
+      POSTGRES_DB: athlete_lookalike
+    ports:
+      - "5434:5432"
+    volumes:
+      - athlete_postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U athlete -d athlete_lookalike"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: athlete-lookalike-redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  athlete_postgres_data:
