@@ -24,3 +24,7 @@ phase2-engine/data/ingest/*
 
 # OS junk
 .DS_Store
+
+# Log files
+*.log
+backend_log.txt

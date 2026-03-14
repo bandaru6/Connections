@@ -149,25 +149,65 @@ def get_aarav_matches() -> list[dict]:
 
 def get_prerith_matches() -> list[dict]:
     """Special matches for Prerith."""
-    prerith_athletes = [
-        ("Khris Middleton", "nba", 48.0),
-        ("Scottie Barnes", "nba", 45.2),
-        ("Dennis Schroder", "nba", 42.7),
-        ("Joakim Noah", "nba", 40.1),
-        ("Shelden Williams", "nba", 37.8),
-        ("Cody Mauch", "nfl", 35.4),
-        ("Mekhi Becton", "nfl", 33.1),
-        ("Paul McQuistan", "nfl", 30.6),
-        ("Joshua Dobbs", "nfl", 28.3),
-        ("Lamar Jackson", "nfl", 25.9),
+    import random
+
+    # Khris Middleton always #1 with updated randomized percentage
+    top_match = ("Khris Middleton", "nba", round(random.uniform(34.0, 36.0), 1))
+
+    # Actual lookalikes (or at least better matches)
+    good_matches = [
+        ("Shai Gilgeous-Alexander", "nba"),
+        ("Immanuel Quickley", "nba"),
+        ("Tyrese Maxey", "nba"),
     ]
 
-    matches = []
-    for name, league, similarity in prerith_athletes:
-        # Convert name to folder format
-        folder_name = name.replace(" ", "_")
-        image_url = f"/images/{league}/{folder_name}/{folder_name}.png"
+    # Funny/Random matches
+    funny_matches = [
+        ("Scottie Barnes", "nba"),
+        ("Dennis Schroder", "nba"),
+        ("Joakim Noah", "nba"),
+        ("Shelden Williams", "nba"),
+        ("Cody Mauch", "nfl"),
+        ("Mekhi Becton", "nfl"),
+        ("Paul McQuistan", "nfl"),
+        ("Joshua Dobbs", "nfl"),
+        ("Lamar Jackson", "nfl"),
+    ]
+    
+    # Guarantee at least 2 good matches
+    selected_good = random.sample(good_matches, 2)
+    
+    # Fill the rest with funny matches (need 7 more to make 9 total 'others')
+    # If funny_matches has fewer than 7, take all. 
+    # (Here we know it has 9, so sampling 7 is safe)
+    selected_funny = random.sample(funny_matches, 7)
+    
+    # Combine and shuffle
+    selected_others = selected_good + selected_funny
+    random.shuffle(selected_others)
 
+    # Assign random percentages in descending order (below top match)
+    # User requested range 20-30%
+    percentages = sorted([round(random.uniform(20.0, 30.0), 1) for _ in range(len(selected_others))], reverse=True)
+
+    matches = []
+
+    # Add top match first
+    name, league, similarity = top_match
+    folder_name = name.replace(" ", "_")
+    matches.append({
+        "athlete_id": f"prerith-{name.lower().replace(' ', '-')}",
+        "name": name,
+        "league": league,
+        "team": None,
+        "position": None,
+        "similarity": similarity,
+        "image_url": f"/images/{league}/{folder_name}/{folder_name}.png"
+    })
+
+    # Add shuffled others with random percentages
+    for (name, league), similarity in zip(selected_others, percentages):
+        folder_name = name.replace(" ", "_")
         matches.append({
             "athlete_id": f"prerith-{name.lower().replace(' ', '-')}",
             "name": name,
@@ -175,7 +215,7 @@ def get_prerith_matches() -> list[dict]:
             "team": None,
             "position": None,
             "similarity": similarity,
-            "image_url": image_url
+            "image_url": f"/images/{league}/{folder_name}/{folder_name}.png"
         })
 
     return matches
