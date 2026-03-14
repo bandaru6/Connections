@@ -1,6 +1,6 @@
 # Python venvs
 .venv*/
-venv/
+venv*/
 env/
 
 # Python cache
