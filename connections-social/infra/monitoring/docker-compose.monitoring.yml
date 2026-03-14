@@ -1,0 +1,114 @@
+# Optional monitoring stack — Prometheus + Grafana + Jaeger + Elasticsearch + Kibana
+#
+# Usage (from connections-social/ directory):
+#   docker compose -f docker-compose.yml -f infra/monitoring/docker-compose.monitoring.yml up -d
+#
+# Then open:
+#   Prometheus:    http://localhost:9090
+#   Grafana:       http://localhost:3002  (admin / admin)
+#   Jaeger UI:     http://localhost:16686
+#   Elasticsearch: http://localhost:9200
+#   Kibana:        http://localhost:5601
+#
+# Enable OTel tracing (sends spans to Jaeger):
+#   OTEL_ENABLED=true uvicorn app.main:app ...
+#   (or set OTEL_ENABLED=true in your shell before starting the backend)
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: connections-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    networks:
+      - connections_default
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: connections-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/connections.json:ro
+      - ./grafana-provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3002:3000"
+    networks:
+      - connections_default
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Jaeger — distributed tracing backend (receives OTLP spans from the FastAPI app)
+  # The backend sends traces via OTLP gRPC to localhost:4317 when OTEL_ENABLED=true.
+  jaeger:
+    image: jaegertracing/all-in-one:1.55
+    container_name: connections-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver (used by FastAPI app)
+      - "4318:4318"    # OTLP HTTP receiver (optional)
+    networks:
+      - connections_default
+    restart: unless-stopped
+
+  # Elasticsearch — indexes every ObservationEvent for full-text search
+  # Accessible at http://localhost:9200 and from the backend at http://localhost:9200
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: connections-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - connections_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Kibana — visualization UI for Elasticsearch data
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: connections-kibana
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports:
+      - "5601:5601"
+    networks:
+      - connections_default
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  es_data:
+
+networks:
+  connections_default:
+    external: true
+    name: connections-social_default

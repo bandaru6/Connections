@@ -1,0 +1,165 @@
+---
+# Backend Deployment — connections-social FastAPI service.
+#
+# Design decisions documented for interview:
+#
+# 1. Stateless replicas: the backend holds no per-request in-process state
+#    (connection pool is process-local but doesn't require sticky sessions).
+#    This means any replica can serve any request — horizontal scaling works.
+#
+# 2. Resource requests vs limits:
+#    requests: guaranteed allocation for scheduling (Kubernetes uses this for bin-packing).
+#    limits:   hard cap — the container is OOM-killed if it exceeds memory limit.
+#    CPU is throttled (not killed) when it hits the limit.
+#    Memory request is set high (1.5Gi) because InsightFace buffalo_l adds ~500MB
+#    on first inference. Without an adequate request, the pod gets evicted under
+#    node memory pressure.
+#
+# 3. Liveness vs readiness probes:
+#    livenessProbe  → if this fails, Kubernetes restarts the container.
+#                     Points at /health (liveness = "is the process alive?").
+#    readinessProbe → if this fails, Kubernetes removes the pod from Service endpoints.
+#                     Points at /ready (readiness = "can this pod serve traffic?").
+#    Both are separate because a pod can be alive (process running) but not ready
+#    (DB unavailable). We want to stop sending traffic without killing the pod.
+#
+# 4. ML model singleton: InsightFace is loaded lazily on first inference.
+#    The readiness probe checks whether the model is loaded; in production you
+#    would add a startup script that pre-warms the model so the pod is not marked
+#    ready until the model is loaded and the first inference succeeds.
+#
+# 5. No ML model in prod without GPU: the CPUExecutionProvider is fine for demo
+#    scale. At Tesla's throughput, the embedding service would be a dedicated GPU
+#    pod behind an internal gRPC interface, scaling independently from the API pod.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: connections-backend
+  namespace: connections
+  labels:
+    app: connections-backend
+    tier: backend
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: connections-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Allow 1 extra pod during rollout
+      maxUnavailable: 0  # Never take a pod down before a new one is ready
+  template:
+    metadata:
+      labels:
+        app: connections-backend
+        tier: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security: run as non-root user (see Dockerfile USER directive)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: backend
+          image: connections-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # Environment from ConfigMap (non-sensitive)
+          envFrom:
+            - configMapRef:
+                name: connections-backend-config
+
+          # Sensitive values from Secret (DATABASE_URL, REDIS_URL, API_KEY)
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: connections-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: connections-secrets
+                  key: redis-url
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: connections-secrets
+                  key: api-key
+
+          # Resource allocation
+          # requests: what the scheduler guarantees; limits: hard cap
+          resources:
+            requests:
+              cpu: "500m"       # 0.5 vCPU — adequate for API + pool management
+              memory: "1536Mi"  # 1.5 GiB — headroom for InsightFace model (~500MB)
+            limits:
+              cpu: "2000m"      # 2 vCPU burst for ML inference spikes
+              memory: "4096Mi"  # 4 GiB hard cap — OOM kill before node pressure
+
+          # Liveness probe: is the process alive?
+          # Uses /health which checks PostgreSQL + Redis connectivity.
+          # Failure → container restart. Conservative thresholds to avoid
+          # restart storms during transient DB blips.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15   # Give the app time to start
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3       # Restart after 3 consecutive failures (60s)
+
+          # Readiness probe: should this pod receive traffic?
+          # Uses /ready which returns 503 if PostgreSQL or Redis are unavailable.
+          # Failure → pod removed from Service endpoints but NOT restarted.
+          # More aggressive than liveness (shorter period) for faster traffic gating.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2   # Remove from rotation after 2 failures (20s)
+            successThreshold: 1   # Re-add after 1 success
+
+          # Startup probe: give the ML model time to load on cold start.
+          # Without this, the liveness probe can kill the pod before the model loads.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30  # 30 * 5s = 150s max startup time (model download)
+
+          # Graceful shutdown: drain in-flight requests before termination
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: connections-uploads-pvc
+
+      # Graceful termination: 30s for in-flight requests + 5s preStop hook
+      terminationGracePeriodSeconds: 35

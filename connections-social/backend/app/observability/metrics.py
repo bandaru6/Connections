@@ -88,6 +88,32 @@ graph_edges_total = Gauge(
     "Total edges in the social graph"
 )
 
+# --- Connection Pool Metrics ---
+
+db_pool_checked_out = Gauge(
+    "db_pool_connections_checked_out",
+    "Number of database connections currently in use"
+)
+
+db_pool_available = Gauge(
+    "db_pool_connections_available",
+    "Number of database connections available in the pool"
+)
+
+# --- Cache Metrics ---
+
+cache_hits_total = Counter(
+    "cache_hits_total",
+    "Total cache hits for graph query responses",
+    ["endpoint"]
+)
+
+cache_misses_total = Counter(
+    "cache_misses_total",
+    "Total cache misses for graph query responses",
+    ["endpoint"]
+)
+
 
 def normalize_path(path: str) -> str:
     """Normalize path for metrics to avoid high cardinality.
@@ -170,6 +196,28 @@ def update_graph_metrics(persons: int, edges: int) -> None:
 
     graph_persons_total.set(persons)
     graph_edges_total.set(edges)
+
+
+def update_pool_metrics(checked_out: int, available: int) -> None:
+    """Update DB connection pool utilization metrics."""
+    if not config.metrics_enabled:
+        return
+    db_pool_checked_out.set(checked_out)
+    db_pool_available.set(available)
+
+
+def track_cache_hit(endpoint: str) -> None:
+    """Record a cache hit for the given endpoint."""
+    if not config.metrics_enabled:
+        return
+    cache_hits_total.labels(endpoint=endpoint).inc()
+
+
+def track_cache_miss(endpoint: str) -> None:
+    """Record a cache miss for the given endpoint."""
+    if not config.metrics_enabled:
+        return
+    cache_misses_total.labels(endpoint=endpoint).inc()
 
 
 @metrics_router.get("/metrics")

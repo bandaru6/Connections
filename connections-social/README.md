@@ -1,22 +1,60 @@
-# Connections Social
+# Connections — Event Ingestion & Graph Pipeline
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/bandaru6/Connections/actions/workflows/ci.yml/badge.svg)](https://github.com/bandaru6/Connections/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue.svg)](https://www.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Build a social graph from photos using face recognition. Upload group photos, and the system automatically detects faces, matches them to known identities, and builds a weighted relationship graph based on co-appearances.
+An **event-driven ingestion and enrichment pipeline** that processes raw image observations, extracts 512-dimensional face embeddings using InsightFace, classifies detections against a reference corpus, persists co-occurrence events with full data lineage, and exposes a queryable weighted relationship graph.
+
+Built around telemetry pipeline principles: **idempotent ingestion**, **replay capability**, **circuit-breaker isolation**, **structured observability**, and **Kubernetes-ready deployment**.
 
 <p align="center">
   <img src="assets/demo-screenshot.png" alt="Demo Screenshot" width="800">
 </p>
 
+---
+
+## Pipeline Overview
+
+Each uploaded image is an **observation event** that moves through a typed lifecycle:
+
+```
+Image Upload  →  Feature Extraction  →  Classification  →  Persistence
+(observation)    (512-dim embedding)    (cosine match)     (graph edge + lineage)
+```
+
+| Pipeline Stage | This System | Tesla Autonomy Analog |
+|---|---|---|
+| **Observation received** | `POST /ingest/upload` — image saved, idempotency checked | Camera frame received from vehicle |
+| **Feature extraction** | InsightFace detection → 512-dim `normed_embedding` | Perception model → bounding boxes + features |
+| **Classification** | Cosine similarity against reference corpus (O(n) → pgvector O(log n)) | Object classifier → class label + confidence |
+| **Event persisted** | Edge upsert + `edge_evidence` row with model version, confidence, timestamp | Telemetry event written to time-series store |
+| **Replay** | `POST /admin/replay` — reprocess with new model, backfill lineage | Reprocess historical frames with updated model weights |
+| **Idempotency** | `processed_images` ledger — duplicate upload returns SKIPPED | Deduplication key prevents duplicate telemetry records |
+
+Every ingest call returns a structured `ObservationEvent`:
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "PERSISTED",
+  "faces_detected": 3,
+  "known_matches": 2,
+  "edges_created": 1,
+  "edge_provenance": [{"person_a": "Alice", "person_b": "Bob", "model_version": "buffalo_l", "confidence_a": 0.82}],
+  "latency_ms": {"receive": 12.1, "pipeline": 843.5, "total": 855.6}
+}
+```
+
+---
+
 ## Quick Start
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) & Docker Compose (v2.0+)
-- 8GB+ RAM recommended (for ML model)
+- [Docker Desktop](https://docs.docker.com/get-docker/) with Compose v2 (enable Kubernetes for K8s demo)
+- 8GB+ RAM (InsightFace buffalo_l model: ~350MB)
 
 ### One-Command Demo
 
@@ -25,332 +63,311 @@ git clone https://github.com/bandaru6/Connections.git
 cd Connections/connections-social
 cp .env.example .env
 docker compose up --build -d
+make seed          # Loads reference profiles + demo images
 ```
-
-Wait for services to start (first run downloads ML models, ~2-5 min), then seed demo data:
-
-```bash
-make seed
-```
-
-**That's it!** Open your browser:
 
 | Service | URL |
-|---------|-----|
-| **Frontend** | http://localhost:3000 |
-| **Backend API** | http://localhost:8000 |
-| **API Docs** | http://localhost:8000/docs |
-
-### What You Should See
-
-1. **Graph View**: An interactive network visualization showing 10 demo people connected by 18 edges
-2. **People Panel**: List of all persons in the graph with connection counts
-3. **Stats**: Graph summary showing total nodes, edges, and co-appearances
-
-### Stopping
+|---|---|
+| Frontend | http://localhost:3000 |
+| Backend API + docs | http://localhost:8000 / http://localhost:8000/docs |
+| Prometheus metrics | http://localhost:8000/metrics |
 
 ```bash
-docker compose down        # Stop services (keeps data)
-docker compose down -v     # Stop and wipe all data
+docker compose down      # Stop (keeps data)
+docker compose down -v   # Stop + wipe
 ```
 
-## Features
+### Local Development (databases only)
 
-### Core Functionality
-- **Face Detection & Recognition** — InsightFace (buffalo_l) for accurate face detection and 512-dimensional embeddings
-- **Identity Matching** — Cosine similarity matching against known profiles with configurable thresholds
-- **Social Graph Construction** — Weighted edges based on co-appearances with photo evidence
-- **Graph Queries** — Neighbors, ego networks, shortest paths between people
-- **Interactive UI** — Next.js dashboard with vis-network graph visualization
-- **One-Command Setup** — Fully containerized with Docker Compose
+```bash
+make dev                        # Starts Postgres + Redis in Docker
 
-### Production-Grade Infrastructure
-- **Observability** — Structured JSON logging, Prometheus metrics (`/metrics`), optional OpenTelemetry tracing
-- **Data Lineage** — Every graph edge tracks model version, confidence scores, and processing timestamp
-- **Async Processing** — Background job system with Redis-backed status tracking (poll via `/jobs/{id}`)
-- **Circuit Breaker** — ML inference isolation with automatic failure detection and recovery
-- **Idempotent Ingestion** — Duplicate detection prevents reprocessing of identical images
-- **Replay Capability** — Reprocess historical data with updated models via `/admin/replay`
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload   # http://localhost:8000
+```
+
+---
+
+## Key Endpoints
+
+### Ingestion Pipeline
+
+| Endpoint | Description |
+|---|---|
+| `POST /ingest/upload` | Submit one observation event; returns `ObservationEvent` with stage + latency |
+| `POST /ingest/batch` | Async batch — returns job ID for polling |
+| `POST /ingest/folder` | Blocking batch of all images in uploads/ |
+| `GET /ingest/circuit-breaker/status` | ML inference isolation state |
+| `POST /ingest/circuit-breaker/reset` | Manually close circuit breaker |
+
+### Graph Queries
+
+| Endpoint | Description |
+|---|---|
+| `GET /graph/summary` | Top edges + graph stats (Redis-cached, TTL 60s) |
+| `GET /graph/neighbors?person=Name` | Direct connections (Redis-cached, TTL 30s) |
+| `GET /graph/ego?person=Name&depth=2` | BFS ego network |
+| `GET /graph/path?source=A&target=B` | Shortest path |
+
+### Observability & Admin
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness probe (always 200, reports degraded state) |
+| `GET /ready` | Readiness probe (503 if any dependency down) |
+| `GET /metrics` | Prometheus metrics |
+| `GET /system/info` | Process memory, pool utilization, embedding memory model |
+| `GET /admin/benchmark` | Brute-force vs pgvector ANN timing comparison |
+| `POST /admin/replay` | Reprocess historical events with current model |
+| `POST /admin/rebuild-profile-index` | Rebuild reference corpus embeddings |
+
+---
 
 ## Architecture
 
 ```
-                              ┌─────────────────────────────────────┐
-                              │           Observability             │
-                              │  • Structured JSON Logs             │
-                              │  • Prometheus Metrics (/metrics)    │
-                              │  • OpenTelemetry Traces (optional)  │
-                              └──────────────────┬──────────────────┘
-                                                 │
-┌─────────────┐     ┌────────────────────────────▼───────────────────┐
-│   Next.js   │────▶│              FastAPI Backend                   │
-│   :3000     │     │  ┌──────────────┐  ┌────────────────────────┐  │
-└─────────────┘     │  │   Circuit    │  │   Async Job System     │  │
-                    │  │   Breaker    │──│   (Redis-backed)       │  │
-                    │  └──────┬───────┘  └────────────────────────┘  │
-                    │         │                                       │
-                    │  ┌──────▼───────┐  ┌────────────────────────┐  │
-                    │  │  InsightFace │  │   Data Lineage         │  │
-                    │  │  (buffalo_l) │  │   (model version,      │  │
-                    │  └──────────────┘  │    confidence, time)   │  │
-                    │                    └────────────────────────┘  │
-                    └───────────────────────────┬────────────────────┘
-                                                │
-                          ┌─────────────────────┼─────────────────────┐
-                          │                     │                     │
-                    ┌─────▼─────┐         ┌─────▼─────┐               │
-                    │ PostgreSQL│         │   Redis   │               │
-                    │   :5433   │         │   :6379   │               │
-                    │  (graph,  │         │  (jobs,   │               │
-                    │  lineage) │         │  cache)   │               │
-                    └───────────┘         └───────────┘               │
+                     ┌──────────────────────────────────────────┐
+                     │            Observability Stack            │
+                     │  Prometheus metrics · JSON logs · OTel   │
+                     │  Grafana dashboard · Alerting rules       │
+                     └─────────────────┬────────────────────────┘
+                                       │
+  ┌──────────────┐   ┌─────────────────▼──────────────────────┐
+  │  Next.js     │──▶│              FastAPI Backend            │
+  │  Frontend    │   │                                         │
+  └──────────────┘   │  Rate Limit ──▶ Auth ──▶ Routes        │
+                     │                                         │
+                     │  /ingest  →  CircuitBreaker             │
+                     │             │                           │
+                     │             ▼                           │
+                     │          InsightFace (buffalo_l)        │
+                     │          512-dim embedding              │
+                     │             │                           │
+                     │             ▼                           │
+                     │          Cosine match → ObservationEvent│
+                     └───────────────────────┬────────────────┘
+                                             │
+               ┌─────────────────────────────┼─────────────────────┐
+               ▼                             ▼                     ▼
+      ┌────────────────┐           ┌──────────────────┐   ┌──────────────┐
+      │   PostgreSQL   │           │     Redis         │   │    K8s       │
+      │  persons       │           │  Query cache      │   │  Deployment  │
+      │  embeddings    │           │  Job state        │   │  HPA (2-10)  │
+      │  edges         │           │  Rate limits      │   │  Ingress     │
+      │  edge_evidence │           └──────────────────┘   └──────────────┘
+      │  + pgvector    │
+      └────────────────┘
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
+### Key Design Decisions
 
-## Commands
+| Decision | Choice | Why |
+|---|---|---|
+| Embedding storage | BYTEA (+ pgvector migration path) | Zero-dep default; migrate to ANN at >10K profiles |
+| Connection pooling | `ThreadedConnectionPool` min=2 max=10 | 5-10ms → 0.1ms checkout; bounded by `max_connections/replicas` |
+| Redis caching | SCAN-based prefix invalidation | Non-blocking at large keyspaces; graph changes visible within 1 TTL |
+| Rate limiting | Redis fixed-window per IP | Distributed — works correctly across min=2 replicas |
+| Auth | FastAPI `APIKeyHeader` dependency | Applied at router level; zero per-route boilerplate; disabled in dev |
+| Circuit breaker | CLOSED→OPEN→HALF_OPEN | Isolates ML failures from graph read endpoints |
+| Async jobs | Thread pool + Redis state | Avoids blocking the ASGI event loop for 1-2s inference workloads |
 
-### Docker (Recommended)
+---
 
-| Command | Description |
-|---------|-------------|
-| `make up` | Build and start all services |
-| `make down` | Stop all services (preserves data) |
-| `make reset` | Wipe all data and restart fresh |
-| `make seed` | Seed demo data into the database |
-| `make logs` | Tail logs from all services |
-| `make status` | Show service health status |
-| `make clean` | Remove all containers, images, and volumes |
+## Observability
 
-### Local Development
-
-For development without full Docker:
+### Prometheus Metrics (10 alerting rules)
 
 ```bash
-# Start databases only
-make dev
-
-# Terminal 1: Backend
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-make backend
-
-# Terminal 2: Frontend
-cd frontend
-npm install
-make frontend
+curl localhost:8000/metrics
 ```
 
-| Command | Description |
-|---------|-------------|
-| `make dev` | Start only Postgres/Redis |
-| `make backend` | Start backend locally |
-| `make frontend` | Start frontend locally |
-| `make stop` | Stop local backend and frontend |
+Key metrics: `http_request_duration_seconds` (p50/p95/p99), `db_pool_checked_out`, `cache_hits_total`, `faces_detected_total`, `faces_matched_total`
+
+### Alerting Rules (`infra/monitoring/alerts.yml`)
+
+| Alert | Severity | Condition |
+|---|---|---|
+| BackendDown | critical | service unreachable for 1m |
+| HighErrorRate | critical | >5% 5xx over 5m |
+| HighP99Latency | warning | p99 > 5s over 5m |
+| DBPoolNearExhaustion | warning | checked_out/max > 80% |
+| CircuitBreakerOpen | critical | state=OPEN for 1m |
+| IngestStalled | info | ingest rate=0 while service is up for 30m |
+
+### Grafana Dashboard
+
+```bash
+docker compose -f infra/monitoring/docker-compose.monitoring.yml up -d
+# Grafana: http://localhost:3001 (admin/admin)
+# Import infra/monitoring/grafana-dashboard.json
+```
+
+---
+
+## Kubernetes Deployment
+
+```bash
+# Prerequisites: kubectl + Docker Desktop K8s enabled
+kubectl apply -f infra/k8s/namespace.yaml
+kubectl apply -f infra/k8s/configmap.yaml
+# Fill in infra/k8s/secrets-template.yaml with real values, then:
+kubectl apply -f infra/k8s/secrets.yaml
+kubectl apply -f infra/k8s/backend-deployment.yaml
+kubectl apply -f infra/k8s/backend-service.yaml
+kubectl apply -f infra/k8s/hpa.yaml
+kubectl apply -f infra/k8s/ingress.yaml
+kubectl apply -f infra/k8s/pvc.yaml
+```
+
+| K8s Resource | Configuration |
+|---|---|
+| Deployment | 2 replicas, RollingUpdate (maxUnavailable=0), non-root UID 1000 |
+| HPA | min=2 max=10, CPU 70% + memory 80% triggers |
+| Probes | liveness→`/health`, readiness→`/ready`, startupProbe (150s for model download) |
+| Ingress | nginx, `/api/*` rewrite, 300s timeout (ML inference), 10 rps rate limit |
+
+---
+
+## Testing
+
+```bash
+cd backend
+
+# Unit tests — no services needed (56 tests)
+pytest tests/test_unit.py -v
+
+# Integration tests — requires running Postgres + Redis
+pytest tests/test_integration.py -v
+
+# Load test (requires locust)
+pip install locust
+locust -f tests/load_test.py --host http://localhost:8000
+# Web UI: http://localhost:8089
+```
+
+### Test Coverage
+
+| Test Class | What it covers |
+|---|---|
+| `TestCosineSimilarity` | Embedding math: identical=1.0, opposite=-1.0, scale invariance |
+| `TestMatchingThresholds` | Classification boundaries including float64 precision edge cases |
+| `TestEmbeddingStorage` | BYTEA pack/unpack round-trip, 2048-byte size |
+| `TestCircuitBreaker` | CLOSED→OPEN→HALF_OPEN transitions, reject-without-call |
+| `TestJobStateMachine` | PENDING→RUNNING→COMPLETED/FAILED transitions |
+| `TestMetricsPathNormalization` | UUID/numeric ID path cardinality prevention |
+| `TestApiKeyAuth` | Dev-mode bypass, correct key, wrong key → 401 |
+| `TestRateLimitConfig` | Ingest < default limit, probe paths exempt |
+
+---
+
+## pgvector Migration (scaling path)
+
+The current matching path is O(n_profiles) Python cosine similarity. At >10K profiles, migrate to pgvector ANN:
+
+```bash
+# 1. Apply schema migration (adds embedding_vec vector(512) column + IVFFlat index)
+psql $DATABASE_URL -f infra/docker/migrate_pgvector.sql
+
+# 2. Populate from existing BYTEA column
+python backend/scripts/migrate_embeddings.py
+
+# 3. Verify the performance difference
+curl localhost:8000/admin/benchmark
+```
+
+The `/admin/benchmark` endpoint runs both methods against live data and returns timing + scaling projections.
+
+---
 
 ## Project Structure
 
 ```
 connections-social/
-├── backend/              # FastAPI application
+├── backend/
 │   ├── app/
-│   │   ├── main.py       # Entry point
-│   │   ├── config.py     # Configuration
-│   │   ├── db.py         # Database connection
-│   │   └── routes/       # API endpoints
-│   ├── Dockerfile        # Backend container
-│   └── requirements.txt
-├── frontend/             # Next.js application
-│   ├── app/              # App router pages
-│   ├── components/       # React components
-│   ├── lib/              # Utilities
-│   └── Dockerfile        # Frontend container
-├── infra/                # Infrastructure
+│   │   ├── main.py              # Lifespan, middleware, router registration
+│   │   ├── config.py            # All env-var config (DB, Redis, API_KEY, pool)
+│   │   ├── auth.py              # X-API-Key dependency (router-level injection)
+│   │   ├── rate_limit.py        # Redis fixed-window rate limiting middleware
+│   │   ├── db.py                # ThreadedConnectionPool, get_cursor()
+│   │   ├── cache.py             # Redis query cache with SCAN invalidation
+│   │   ├── circuit_breaker.py   # CLOSED/OPEN/HALF_OPEN state machine
+│   │   ├── jobs.py              # Async job manager (Redis-backed)
+│   │   ├── schemas/events.py    # ObservationEvent Pydantic schema
+│   │   ├── routes/
+│   │   │   ├── ingest.py        # Pipeline: detect → match → persist
+│   │   │   ├── graph.py         # Graph queries (cached)
+│   │   │   ├── admin.py         # Admin ops + /benchmark endpoint
+│   │   │   ├── profiles.py      # Reference corpus management
+│   │   │   └── jobs.py          # Job status polling
+│   │   └── observability/       # Prometheus metrics, structured logging, OTel
+│   ├── scripts/
+│   │   └── migrate_embeddings.py  # Populate pgvector column from BYTEA
+│   ├── tests/
+│   │   ├── test_unit.py         # 56 unit tests (no services)
+│   │   ├── test_integration.py  # 7 integration tests (Postgres + Redis)
+│   │   └── load_test.py         # Locust: ReadUser × 10, IngestUser × 1
+│   ├── Dockerfile               # Non-root UID 1000, multi-stage ready
+│   ├── requirements.txt
+│   └── requirements-dev.txt
+├── infra/
 │   ├── docker/
-│   │   └── init.sql      # Database schema
-│   └── docker-compose.yml  # DB-only compose (local dev)
-├── scripts/              # Utility scripts
-│   ├── seed_demo.py      # Seed demo data
-│   └── repopulate_profiles.py
-├── data/                 # Data files
-│   ├── profiles/         # Reference face images (1 per person)
-│   └── demo_uploads/     # Demo group photos
-├── docs/                 # Documentation
-├── docker-compose.yml    # Full stack compose
-├── Makefile              # Developer commands
-└── .env.example          # Environment template
+│   │   ├── init.sql             # Full schema (uuid-ossp, all indexes)
+│   │   └── migrate_pgvector.sql # pgvector extension + IVFFlat index
+│   ├── k8s/                     # 8 manifests: Namespace, ConfigMap, Secrets,
+│   │   │                        # Deployment, Service, HPA, Ingress, PVC
+│   └── monitoring/
+│       ├── alerts.yml           # 10 Prometheus alerting rules with runbooks
+│       ├── grafana-dashboard.json
+│       ├── prometheus.yml
+│       └── docker-compose.monitoring.yml
+├── docs/
+│   ├── INTERVIEW_GUIDE.md       # 30s/2min/10min pitches, Q&A
+│   ├── TELEMETRY_ALIGNMENT.md   # Tesla concept → this system mapping
+│   ├── TRADEOFFS.md             # Architecture decisions with numbers
+│   ├── FUTURE_WORK.md           # Kafka, GPU workers, DynamoDB, ES
+│   └── ARCHITECTURE.md          # Detailed system design
+├── docker-compose.yml
+├── Makefile
+└── .env.example
 ```
 
-## API Overview
-
-### Core Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/metrics` | GET | Prometheus metrics |
-| `/admin/rebuild-profile-index` | POST | Rebuild face embeddings from profiles |
-| `/admin/reset-demo` | POST | Clear graph, keep profiles |
-| `/admin/replay` | POST | Reprocess historical data with current model |
-| `/ingest/upload` | POST | Upload and process single image |
-| `/ingest/folder` | POST | Process all images in uploads/ (blocking) |
-| `/ingest/batch` | POST | Async batch ingestion (returns job ID) |
-| `/jobs/{job_id}` | GET | Poll job status and progress |
-| `/graph/summary` | GET | Graph statistics |
-| `/graph/neighbors` | GET | Get person's connections |
-| `/graph/ego` | GET | Get ego network |
-| `/graph/path` | GET | Find shortest path |
-| `/profiles/list` | GET | List all profiles |
-| `/profiles/create` | POST | Create new profile |
-
-### Reliability Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/ingest/circuit-breaker/status` | GET | Check ML inference circuit breaker state |
-| `/ingest/circuit-breaker/reset` | POST | Manually reset circuit breaker |
-
-See [docs/API.md](docs/API.md) for full API reference.
-
-## How It Works
-
-### 1. Profile Index
-```
-data/profiles/Barack Obama/*.jpg  →  InsightFace  →  512-dim embedding  →  PostgreSQL
-```
-
-### 2. Image Ingestion
-```
-uploads/group_photo.jpg  →  Detect faces  →  Match to profiles  →  Create edges
-```
-
-### 3. Graph Query
-```
-GET /graph/ego?person=Barack Obama&depth=2  →  BFS traversal  →  Subgraph JSON
-```
-
-## Observability & Reliability
-
-### Structured Logging
-
-All requests are logged in JSON format with request IDs, latencies, and status codes:
-
-```json
-{
-  "timestamp": "2024-01-15T10:30:00Z",
-  "level": "INFO",
-  "request_id": "abc-123",
-  "method": "POST",
-  "path": "/ingest/upload",
-  "status_code": 200,
-  "latency_ms": 1523.45
-}
-```
-
-### Metrics
-
-Prometheus metrics available at `/metrics`:
-
-- `http_requests_total` — Request counts by method, path, status
-- `http_request_duration_seconds` — Latency histogram (p50, p95, p99)
-- `faces_detected_total` — Total faces detected
-- `faces_matched_total` — Successful identity matches
-- `in_flight_requests` — Currently processing requests
-
-### Circuit Breaker
-
-ML inference is protected by a circuit breaker that:
-- Opens after 5 failures in 60 seconds
-- Returns 503 immediately when open (fail-fast)
-- Automatically tests recovery after 30 seconds
-
-Check status: `GET /ingest/circuit-breaker/status`
-
-### Async Job Processing
-
-Long-running operations return immediately with a job ID:
-
-```bash
-# Start batch ingestion
-curl -X POST localhost:8000/ingest/batch
-# {"job_id": "abc-123", "poll_url": "/jobs/abc-123"}
-
-# Poll for status
-curl localhost:8000/jobs/abc-123
-# {"status": "running", "progress": {"current": 5, "total": 20, "percentage": 25.0}}
-```
-
-### Data Lineage
-
-Every graph edge tracks provenance:
-- `model_version`: Which ML model produced the match
-- `confidence_a`, `confidence_b`: Match confidence for each person
-- `processed_at`: When the edge was created
-
-Query lineage via `/admin/replay` to reprocess with updated models.
+---
 
 ## Configuration
 
-Environment variables (`.env`):
-
 ```bash
-# Backend Core
+# Database
 DATABASE_URL=postgresql://connections:connections@postgres:5432/connections
+DB_POOL_MIN_CONN=2        # Warm connections at idle
+DB_POOL_MAX_CONN=10       # Cap: max_connections(100) / replicas(10) = 10
+
+# Redis
 REDIS_URL=redis://redis:6379/0
-PROFILES_DIR=/app/data/profiles
-UPLOADS_DIR=/app/uploads
+
+# Auth (empty = disabled in dev; always set in production via K8s Secret)
+API_KEY=
+
+# ML
 INSIGHTFACE_MODEL=buffalo_l
 
 # Observability
-LOG_LEVEL=INFO                           # DEBUG, INFO, WARNING, ERROR
-LOG_JSON=true                            # JSON logs for production
-METRICS_ENABLED=true                     # Enable Prometheus metrics
-OTEL_ENABLED=false                       # Enable OpenTelemetry tracing
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-
-# Frontend
-NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
-
-# Ports (change if conflicts)
-POSTGRES_PORT=5433
-REDIS_PORT=6379
-BACKEND_PORT=8000
-FRONTEND_PORT=3000
+LOG_LEVEL=INFO
+LOG_JSON=true
+METRICS_ENABLED=true
+OTEL_ENABLED=false
 ```
 
-## Troubleshooting
-
-### Services not starting?
-```bash
-make logs                    # Check logs
-make status                  # Check health
-docker compose ps            # See container status
-```
-
-### Port conflicts?
-Edit `.env` to change ports:
-```bash
-BACKEND_PORT=8001
-FRONTEND_PORT=3001
-```
-
-### Fresh start?
-```bash
-make clean                   # Remove everything
-make up && make seed         # Start fresh
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE)
 
 ## Acknowledgments
 
-- [InsightFace](https://github.com/deepinsight/insightface) for face recognition
-- [vis-network](https://visjs.github.io/vis-network/docs/network/) for graph visualization
+- [InsightFace](https://github.com/deepinsight/insightface) — face detection and recognition
+- [vis-network](https://visjs.github.io/vis-network/docs/network/) — graph visualization
+- [pgvector](https://github.com/pgvector/pgvector) — ANN search in PostgreSQL

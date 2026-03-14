@@ -1,0 +1,52 @@
+---
+# Ingress — routes external HTTP(S) traffic to internal services.
+#
+# Uses nginx ingress controller (standard for most managed K8s clusters).
+# TLS termination happens here; traffic inside the cluster is plain HTTP.
+#
+# Path routing:
+#   /api/*  → connections-backend Service (port 80)
+#   /*      → connections-frontend Service (port 80) [if deployed]
+#
+# Interview talking point: ingress is the single entry point into the cluster.
+# Rate limiting, mTLS, WAF rules, and authentication can all be applied at
+# the ingress controller level rather than in each service — a clean separation
+# of concerns. In production at Tesla's scale, this would be replaced with a
+# dedicated API gateway (Kong, Istio Gateway, or AWS API Gateway).
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: connections-ingress
+  namespace: connections
+  labels:
+    app: connections
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"    # Long timeout for ML inference
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"       # Allow large image uploads
+    # Rate limiting at ingress level (requests per second per IP)
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    # Enable sticky sessions for graph query cache consistency (optional)
+    # nginx.ingress.kubernetes.io/affinity: "cookie"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: connections.example.com   # Replace with your domain
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: connections-backend
+                port:
+                  number: 80
+
+  # TLS: reference a Secret containing the TLS certificate and key.
+  # In production, use cert-manager with Let's Encrypt for automatic rotation.
+  tls:
+    - hosts:
+        - connections.example.com
+      secretName: connections-tls-secret

@@ -1,0 +1,266 @@
+# Prometheus Alerting Rules — Connections Ingestion Pipeline
+#
+# These rules define *actionable* alerts: each one has a clear trigger
+# condition, a meaningful severity, and a runbook annotation explaining
+# what to investigate.  The goal is to catch pipeline degradation before
+# it affects data quality — the same principle that governs alerting in
+# a car-to-cloud telemetry system where silent data loss is worse than
+# a noisy alert.
+#
+# Usage:
+#   In prometheus.yml, add under rule_files:
+#     - /etc/prometheus/alerts.yml
+#
+# Alert severity levels:
+#   critical  — immediate action required; pipeline is down or data is lost
+#   warning   — degraded but functional; investigate within the hour
+#   info      — informational; no immediate action required
+
+groups:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Service Availability
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: availability
+    interval: 30s
+    rules:
+
+      - alert: BackendDown
+        expr: up{job="connections-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connections backend is unreachable"
+          description: >
+            The backend has been down for more than 1 minute.
+            No ingestion, graph queries, or job processing is possible.
+          runbook: |
+            1. Check container status: docker compose ps
+            2. Check logs: docker compose logs backend --tail=100
+            3. Verify /health endpoint: curl http://localhost:8000/health
+            4. Check DB and Redis dependencies are running.
+
+      - alert: HighErrorRate
+        # More than 5% of non-health/metrics requests returning 5xx
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5..", path!~"/health|/metrics|/ready"}[5m]))
+            /
+            sum(rate(http_requests_total{path!~"/health|/metrics|/ready"}[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate exceeds 5% over 5 minutes"
+          description: >
+            {{ $value | humanizePercentage }} of requests are returning 5xx errors.
+            This may indicate a database issue, Redis failure, or ML inference crash.
+          runbook: |
+            1. Check http_request_errors_total by path to find the failing endpoint.
+            2. Check circuit breaker state: GET /ingest/circuit-breaker/status
+            3. Verify database connectivity: GET /health
+            4. Review structured logs for exception_type and stacktrace fields.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Latency / Performance
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: latency
+    interval: 30s
+    rules:
+
+      - alert: HighP99Latency
+        # p99 request latency exceeds 5 seconds across all endpoints
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path)
+          ) > 5.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency exceeds 5s on {{ $labels.path }}"
+          description: >
+            The 99th percentile latency on {{ $labels.path }} is
+            {{ $value | humanizeDuration }}.
+            For ingestion endpoints, this likely means the ML model is
+            under CPU pressure or the DB connection pool is saturated.
+          runbook: |
+            1. Check db_pool_connections_checked_out gauge — if near max, pool is saturated.
+            2. Check in_flight_requests gauge — if > 10, consider horizontal scaling.
+            3. Check InsightFace CPU usage on the host: top -p $(pgrep -f uvicorn)
+            4. Consider pre-warming ML model or reducing det_size from 640 to 320.
+
+      - alert: HighP95IngestLatency
+        # Ingestion p95 > 10 seconds (ML inference is slow)
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket{path="/ingest/upload"}[10m])) by (le)
+          ) > 10.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ingest p95 latency exceeds 10s"
+          description: >
+            Image ingestion p95 latency is {{ $value | humanizeDuration }}.
+            Ingestion involves face detection + embedding + DB writes.
+            This is the most latency-sensitive path in the pipeline.
+          runbook: |
+            1. Profile ML inference time: check InsightFace CPU/memory.
+            2. Verify DB write latency is not the bottleneck (check DB logs).
+            3. Consider async ingestion via /ingest/batch instead of /ingest/upload.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # ML Inference / Circuit Breaker
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: ml_inference
+    interval: 15s
+    rules:
+
+      - alert: CircuitBreakerOpen
+        # Circuit breaker for ML inference has tripped — all ingest is failing fast
+        expr: |
+          http_requests_total{status="503", path="/ingest/upload"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ML inference circuit breaker is OPEN"
+          description: >
+            The InsightFace circuit breaker has opened after repeated failures.
+            New ingestion requests are being rejected immediately (fail-fast).
+            No new edges or embeddings are being created.
+          runbook: |
+            1. Check circuit breaker state: GET /ingest/circuit-breaker/status
+            2. Review backend logs for the root exception during inference.
+            3. If model files are corrupt: docker compose exec backend python -c
+               "import insightface; insightface.app.FaceAnalysis('buffalo_l').prepare(ctx_id=0)"
+            4. Manually reset if the underlying issue is resolved:
+               POST /ingest/circuit-breaker/reset
+
+      - alert: InferenceFaceMatchRateLow
+        # Face match rate drops below 30% — model may be miscalibrated or profiles missing
+        expr: |
+          (
+            rate(faces_matched_total[10m])
+            /
+            rate(faces_detected_total[10m])
+          ) < 0.30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Face match rate below 30% over last 10 minutes"
+          description: >
+            Only {{ $value | humanizePercentage }} of detected faces are matching
+            known profiles.  This may mean profile embeddings are stale, the
+            match threshold is too strict, or new unindexed people are dominant
+            in the uploaded images.
+          runbook: |
+            1. Verify profile index is populated: GET /profiles/list
+            2. Check match threshold config (MIN_MATCH_SCORE=0.45, MIN_SCORE_MARGIN=0.05).
+            3. If profiles were recently updated: POST /admin/rebuild-profile-index
+            4. If new people: POST /profiles/create to add them to the corpus.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Database Connection Pool
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: database
+    interval: 15s
+    rules:
+
+      - alert: DBPoolNearExhaustion
+        # Pool is more than 80% checked out — connection queuing is imminent
+        expr: |
+          (
+            db_pool_connections_checked_out
+            /
+            (db_pool_connections_checked_out + db_pool_connections_available)
+          ) > 0.80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB connection pool utilization exceeds 80%"
+          description: >
+            {{ $value | humanizePercentage }} of pooled DB connections are in use.
+            At 100%, new requests will block waiting for a connection.
+            This indicates the service is receiving more concurrent requests
+            than the pool can handle.
+          runbook: |
+            1. Increase DB_POOL_MAX_CONN (currently 10) if PostgreSQL max_connections allows.
+            2. Check if long-running queries are holding connections: SELECT * FROM pg_stat_activity.
+            3. Consider horizontal scaling (multiple backend replicas share the pool limit).
+            4. Check in_flight_requests — if consistently high, rate limiting may be needed.
+
+      - alert: DBPoolExhausted
+        expr: db_pool_connections_available == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "DB connection pool fully exhausted"
+          description: >
+            All {{ $value }} pool connections are checked out.
+            New requests are blocking or failing with pool exhaustion errors.
+          runbook: |
+            1. Immediate: restart backend to reset pool state if connections are leaked.
+            2. Increase DB_POOL_MAX_CONN and redeploy.
+            3. Check for connection leaks: ensure all get_cursor() contexts are releasing properly.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Background Jobs
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: jobs
+    interval: 30s
+    rules:
+
+      - alert: HighInFlightRequests
+        expr: in_flight_requests > 20
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20 requests in flight simultaneously"
+          description: >
+            {{ $value }} requests are currently being processed.
+            Because InsightFace uses the GIL-bound Python threading model,
+            high concurrency here can cause CPU contention and latency spikes.
+          runbook: |
+            1. Check if batch ingest is running (GET /jobs — look for running jobs).
+            2. Consider rate limiting ingestion endpoints to prevent overload.
+            3. For production workloads, separate the ML inference worker
+               from the API process (dedicated worker pool behind a queue).
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Pipeline Throughput
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: throughput
+    interval: 60s
+    rules:
+
+      - alert: IngestStalled
+        # No images processed in the last 30 minutes during business hours
+        # (Only fires if the backend is up — avoids alert storm during planned downtime)
+        expr: |
+          (
+            rate(images_processed_total[30m]) == 0
+          ) and (
+            up{job="connections-backend"} == 1
+          )
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No images ingested in the last 30 minutes"
+          description: >
+            The ingestion pipeline has processed 0 images in the last 30 minutes.
+            This may be expected (no uploads) or may indicate a stuck queue.
+          runbook: |
+            1. Check if any batch jobs are running: GET /jobs
+            2. Check uploads directory for pending files: GET /admin/storage-info
+            3. If uploads exist but aren't being processed, check circuit breaker state.

@@ -1,8 +1,20 @@
-"""Ingestion routes for processing photos and building social graph."""
+"""Ingestion routes for processing photos and building social graph.
 
+Pipeline lifecycle (maps to ObservationEvent.stage):
+  RECEIVED          → image saved, idempotency checked
+  FEATURE_EXTRACTION → InsightFace detection + 512-dim embedding
+  CLASSIFICATION    → cosine similarity match against reference corpus
+  PERSISTED         → edges + evidence written to PostgreSQL, cache invalidated
+  SKIPPED           → filename already in processed_images (idempotency guard)
+  FAILED            → unrecoverable error at any stage
+"""
+
+import asyncio
 import json
 import logging
 import struct
+import time
+import uuid
 from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
@@ -12,10 +24,21 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.config import UPLOADS_DIR, INSIGHTFACE_MODEL
+from app.config import UPLOADS_DIR, INSIGHTFACE_MODEL, USE_PGVECTOR, MAX_UPLOAD_BYTES, ALLOWED_MIME_TYPES
 from app.db import get_cursor
+from app.cache import invalidate_graph_cache
 from app.observability.tracing import create_span, trace_function
 from app.circuit_breaker import insightface_breaker, CircuitBreakerOpen
+from app.schemas.events import (
+    ObservationEvent,
+    PipelineStage,
+    DetectionResult,
+    MatchResult,
+    BoundingBox,
+    EdgeProvenance,
+)
+from app.ws import manager as ws_manager
+from app.search import index_event as es_index_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -187,6 +210,46 @@ def match_face_to_person(
         span.set_attribute("margin", best_score - second_best_score)
 
         return best_name, best_score, second_best_score
+
+
+def match_face_pgvector(face_embedding: np.ndarray, cur) -> Tuple[Optional[str], float, float]:
+    """Match a face using pgvector ANN instead of the Python cosine loop.
+
+    Requires USE_PGVECTOR=true and migrate_pgvector.sql + migrate_embeddings.py
+    to have been run.  Returns (person_name, best_score, second_best_score).
+
+    Uses the <=> operator (cosine distance = 1 - cosine_similarity), so we
+    convert: similarity = 1 - distance.
+
+    Interview note: this replaces O(n_profiles) Python ops with a single
+    indexed SQL query — O(sqrt(n) * probes) via IVFFlat.
+    """
+    vec_literal = "[" + ",".join(f"{v:.8f}" for v in face_embedding.tolist()) + "]"
+    try:
+        cur.execute(
+            """
+            SELECT p.name,
+                   1 - (pp.embedding_vec <=> %s::vector) AS similarity
+            FROM person_profiles pp
+            JOIN persons p ON pp.person_id = p.id
+            WHERE pp.embedding_vec IS NOT NULL
+            ORDER BY pp.embedding_vec <=> %s::vector
+            LIMIT 3
+            """,
+            (vec_literal, vec_literal),
+        )
+        rows = cur.fetchall()
+    except Exception as e:
+        logger.warning("pgvector match failed (%s) — falling back to brute-force", e)
+        return None, 0.0, 0.0
+
+    if not rows:
+        return None, 0.0, 0.0
+
+    best_name = rows[0]["name"]
+    best_score = float(rows[0]["similarity"])
+    second_best_score = float(rows[1]["similarity"]) if len(rows) > 1 else 0.0
+    return best_name, best_score, second_best_score
 
 
 def detect_faces(image_path: Path) -> List[dict]:
@@ -375,9 +438,14 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
     unknown_faces = 0
 
     for i, face in enumerate(faces):
-        person_name, best_score, second_best_score = match_face_to_person(
-            face['embedding'], profiles
-        )
+        if USE_PGVECTOR:
+            person_name, best_score, second_best_score = match_face_pgvector(
+                face['embedding'], cur
+            )
+        else:
+            person_name, best_score, second_best_score = match_face_to_person(
+                face['embedding'], profiles
+            )
 
         margin = best_score - second_best_score
 
@@ -438,77 +506,170 @@ def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, n
     }
 
 
-@router.post("/upload")
-async def ingest_upload(image: UploadFile = File(...), force: bool = False):
-    """
-    Ingest a single uploaded image.
+def _record_failed_ingest(filename: str, stage: str, error: str) -> None:
+    """Write a dead-letter record for a failed ingest event.
 
-    Accepts multipart form with:
-    - image: The image file to process
+    Fails silently — a dead-letter write failure must never obscure the
+    original error.  Inspect via GET /admin/report or query failed_ingests
+    directly.
+    """
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO failed_ingests (filename, error_stage, error_message, model_version)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (filename, stage, error[:2000], MODEL_VERSION),
+            )
+    except Exception as dl_exc:
+        logger.warning("Dead-letter write failed: %s", dl_exc)
+
+
+@router.post("/upload", response_model=ObservationEvent)
+async def ingest_upload(image: UploadFile = File(...), force: bool = False):
+    """Submit a single observation event for pipeline processing.
+
+    Accepts a multipart image upload and runs it through the full ingestion
+    pipeline: idempotency check → face detection → embedding → classification
+    → graph persistence.  Returns a structured ObservationEvent that captures
+    the complete lifecycle with per-stage latencies and data lineage.
 
     Query params:
-    - force: If True, re-process image even if already processed
+      force: Re-process even if this filename is already in the ingestion ledger.
 
-    Returns stats about faces detected, matches, and edges created.
+    Tesla analog: equivalent to submitting a single telemetry frame for
+    cloud-side enrichment and storage.
     """
-    # Ensure uploads directory exists
+    event_id = str(uuid.uuid4())
+    t_receive = time.perf_counter()
+    received_at = datetime.now(timezone.utc)
+
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Save uploaded file
     filename = image.filename
     if not filename:
         raise HTTPException(status_code=400, detail="No filename provided")
+
+    # MIME type validation — reject non-image content early
+    content_type = image.content_type or ""
+    if content_type and content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media type '{content_type}'. Allowed: {sorted(ALLOWED_MIME_TYPES)}",
+        )
 
     file_path = UPLOADS_DIR / filename
 
     try:
         contents = await image.read()
+
+        # File size validation — enforce MAX_UPLOAD_BYTES limit
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large: {len(contents) / 1e6:.1f}MB. "
+                    f"Max allowed: {MAX_UPLOAD_BYTES / 1e6:.0f}MB."
+                ),
+            )
+
         with open(file_path, "wb") as f:
             f.write(contents)
         logger.info(f"Saved uploaded file: {file_path}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
     try:
         with get_cursor() as cur:
-            # Ensure tables exist
             ensure_tables_exist(cur)
 
-            # Check if already processed
+            # Idempotency check — RECEIVED stage
             if is_already_processed(cur, filename):
                 if force:
-                    # Force mode: delete existing record so we can re-process
-                    cur.execute(
-                        "DELETE FROM processed_images WHERE filename = %s",
-                        (filename,)
-                    )
+                    cur.execute("DELETE FROM processed_images WHERE filename = %s", (filename,))
                     logger.info(f"Force mode: removed {filename} from processed_images")
                 else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Image {filename} has already been processed"
+                    t_total = (time.perf_counter() - t_receive) * 1000
+                    return ObservationEvent(
+                        event_id=event_id,
+                        source_filename=filename,
+                        received_at=received_at,
+                        stage=PipelineStage.SKIPPED,
+                        skipped_reason="already_processed",
+                        latency_ms={"receive": round(t_total, 2), "total": round(t_total, 2)},
                     )
 
-            # Load profile embeddings
             profiles = load_profile_embeddings(cur)
 
-            # Process the image
+            # FEATURE_EXTRACTION stage
+            t_extract_start = time.perf_counter()
             stats = process_single_image(cur, file_path, profiles)
+            t_extract_end = time.perf_counter()
 
-            if force:
-                stats['force_mode'] = True
-            return stats
+            extract_ms = (t_extract_end - t_extract_start) * 1000
+            receive_ms = (t_extract_start - t_receive) * 1000
+            total_ms = (t_extract_end - t_receive) * 1000
+
+            # Invalidate graph cache when new edges are written
+            if stats.get('edges_created', 0) > 0:
+                invalidate_graph_cache()
+
+            stage = PipelineStage.PERSISTED if stats.get('faces_detected', 0) > 0 else PipelineStage.PERSISTED
+
+            event = ObservationEvent(
+                event_id=event_id,
+                source_filename=filename,
+                received_at=received_at,
+                stage=stage,
+                faces_detected=stats.get('faces_detected', 0),
+                known_matches=stats.get('known_matches', 0),
+                unknown_faces=stats.get('unknown_faces', 0),
+                edges_created=stats.get('edges_created', 0),
+                latency_ms={
+                    "receive": round(receive_ms, 2),
+                    "pipeline": round(extract_ms, 2),
+                    "total": round(total_ms, 2),
+                },
+            )
+
+            # Broadcast to all WebSocket clients (fire-and-forget)
+            asyncio.create_task(ws_manager.broadcast(event.dict()))
+
+            # Index in Elasticsearch for search (fails open if ES unavailable)
+            es_index_event(event.dict())
+
+            return event
 
     except HTTPException:
         raise
     except CircuitBreakerOpen as e:
+        _record_failed_ingest(filename, "feature_extraction", f"CircuitBreakerOpen: {e}")
         logger.warning(f"ML inference unavailable: {e}")
+        # Broadcast failure event to WebSocket clients
+        asyncio.create_task(ws_manager.broadcast({
+            "event_id": event_id,
+            "source_filename": filename,
+            "stage": PipelineStage.FAILED.value,
+            "error": "ML inference temporarily unavailable (circuit breaker open)",
+        }))
         raise HTTPException(
             status_code=503,
             detail="ML inference temporarily unavailable. Please retry later."
         )
     except Exception as e:
+        _record_failed_ingest(filename, "unknown", str(e))
         logger.error(f"Ingestion failed: {e}")
+        # Broadcast failure event to WebSocket clients
+        asyncio.create_task(ws_manager.broadcast({
+            "event_id": event_id,
+            "source_filename": filename,
+            "stage": PipelineStage.FAILED.value,
+            "error": str(e),
+        }))
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
 
 

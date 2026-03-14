@@ -1,0 +1,35 @@
+---
+# ConfigMap — non-sensitive configuration for the connections backend.
+#
+# Sensitive values (DATABASE_URL, REDIS_URL, API_KEY) must be stored in
+# Kubernetes Secrets, not here.  This ConfigMap only holds values that are
+# safe to inspect in plain text (log levels, feature flags, model names).
+#
+# Interview talking point: separating config from secrets is a K8s best
+# practice. In production, secrets would come from a secrets manager
+# (AWS Secrets Manager, GCP Secret Manager, or Vault) via the CSI driver,
+# not from YAML files committed to source control.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: connections-backend-config
+  namespace: connections
+  labels:
+    app: connections-backend
+    tier: backend
+data:
+  # Observability
+  LOG_LEVEL: "INFO"
+  LOG_JSON: "true"
+  METRICS_ENABLED: "true"
+  OTEL_ENABLED: "false"
+
+  # Connection pool sizing
+  # Rule of thumb: max = (2 * vCPU count) + spindles, capped at DB max_connections / replicas
+  # With 2 vCPUs and max_connections=100, 3 replicas → max=10 per pod leaves headroom
+  DB_POOL_MIN_CONN: "2"
+  DB_POOL_MAX_CONN: "10"
+
+  # ML model
+  INSIGHTFACE_MODEL: "buffalo_l"

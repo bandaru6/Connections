@@ -1,0 +1,25 @@
+# Ruff configuration for connections-social backend
+# https://docs.astral.sh/ruff/
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names)
+    "I",   # isort (import ordering)
+    "B",   # flake8-bugbear (likely bugs)
+    "UP",  # pyupgrade (modernize syntax)
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # do not perform function calls in default arguments (FastAPI pattern)
+    "UP007", # use X | Y for unions — keep Optional[] for psycopg2 compat
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401"]  # allow unused imports in test files
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

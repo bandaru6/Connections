@@ -1,4 +1,15 @@
-"""Graph read API endpoints for querying the social graph."""
+"""Graph read API endpoints for querying the social graph.
+
+Caching strategy
+────────────────
+/graph/summary and /graph/neighbors are cached in Redis for 60s and 30s
+respectively.  These are the highest-frequency read endpoints and each
+requires multiple JOINs across the edges + persons + edge_evidence tables.
+
+Cache is invalidated on any successful ingest operation so that the graph
+reflects the latest data within one TTL window at worst.  If Redis is
+unavailable, all requests fall through to PostgreSQL transparently.
+"""
 
 import logging
 from collections import deque
@@ -7,6 +18,15 @@ from typing import Dict, List, Optional, Set, Tuple
 from fastapi import APIRouter, HTTPException, Query
 
 from app.db import get_cursor
+from app.cache import (
+    get_cached,
+    set_cached,
+    cache_key_summary,
+    cache_key_neighbors,
+    SUMMARY_TTL,
+    NEIGHBORS_TTL,
+)
+from app.observability.metrics import track_cache_hit, track_cache_miss
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,6 +62,14 @@ def graph_summary(include_unknown: bool = Query(False, description="Include UNKN
     - top_edges: top 10 edges by weight (respects include_unknown filter)
     - recent_uploads: 10 most recent processed images
     """
+    cache_key = cache_key_summary(include_unknown)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        track_cache_hit("graph_summary")
+        return cached
+
+    track_cache_miss("graph_summary")
+
     try:
         with get_cursor() as cur:
             # Known persons count
@@ -120,15 +148,18 @@ def graph_summary(include_unknown: bool = Query(False, description="Include UNKN
                 for row in cur.fetchall()
             ]
 
-            return {
+            result = {
                 'persons_total': persons_total,
                 'known_persons_total': known_persons_total,
                 'unknown_persons_total': unknown_persons_total,
                 'edges_total': edges_total,
                 'edges_known_only_total': edges_known_only_total,
                 'top_edges': top_edges,
-                'recent_uploads': recent_uploads
+                'recent_uploads': recent_uploads,
+                '_cached': False,
             }
+            set_cached(cache_key, {**result, '_cached': True}, SUMMARY_TTL)
+            return result
 
     except Exception as e:
         logger.error(f"Graph summary failed: {e}")
@@ -147,6 +178,14 @@ def graph_neighbors(
     Returns neighbors sorted by weight descending, then by neighbor name.
     Each neighbor includes up to 3 evidence filenames.
     """
+    cache_key = cache_key_neighbors(person, include_unknown, limit)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        track_cache_hit("graph_neighbors")
+        return cached
+
+    track_cache_miss("graph_neighbors")
+
     try:
         with get_cursor() as cur:
             # Check if person exists
@@ -225,10 +264,13 @@ def graph_neighbors(
                     'evidence': evidence
                 })
 
-            return {
+            result = {
                 'person': person_name,
-                'neighbors': neighbors
+                'neighbors': neighbors,
+                '_cached': False,
             }
+            set_cached(cache_key, {**result, '_cached': True}, NEIGHBORS_TTL)
+            return result
 
     except HTTPException:
         raise

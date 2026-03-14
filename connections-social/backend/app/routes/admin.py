@@ -679,3 +679,441 @@ def _execute_replay(
     except Exception as e:
         logger.error(f"Replay job {job_id} failed: {e}")
         jm.complete_job(job_id, success=False, error=str(e))
+
+
+# ============================================================================
+# Benchmark: brute-force Python vs pgvector ANN
+# ============================================================================
+
+@router.get("/benchmark")
+def benchmark_matching(top_k: int = 5, iterations: int = 10):
+    """Compare brute-force cosine similarity vs pgvector ANN for face matching.
+
+    Runs both methods against the live profile corpus with a random query
+    embedding and returns measured latency for each approach.
+
+    This endpoint exists to make concrete the O(n) vs O(log n) argument that
+    motivates a pgvector migration at scale.  Run it before and after running
+    the pgvector migration to see the difference with real data.
+
+    Args:
+        top_k:      Number of nearest neighbors to retrieve (default 5).
+        iterations: Number of timed repetitions for statistical stability (default 10).
+
+    Returns:
+        Timing comparison, profile count, and scaling projections.
+
+    Tesla relevance:
+        In a vehicle telemetry pipeline, the equivalent tradeoff is between
+        scanning every historical embedding to find similar events (O(n)) vs
+        using a pre-built ANN index to find approximate matches in O(log n).
+        At tens of millions of events, the index is not optional.
+    """
+    import time as time_lib
+
+    from app.routes.ingest import load_profile_embeddings, cosine_similarity, unpack_embedding
+
+    try:
+        with get_cursor() as cur:
+            # ── Load all profile embeddings (current production path) ──────────
+            profiles = load_profile_embeddings(cur)
+            profile_count = len(profiles)
+
+            if profile_count == 0:
+                return {
+                    "error": "No profiles in database. Run /admin/rebuild-profile-index first.",
+                    "profile_count": 0,
+                }
+
+            # ── Generate a random normalized query embedding ───────────────────
+            rng = np.random.default_rng(seed=42)
+            query_raw = rng.standard_normal(512).astype(np.float32)
+            query_vec = query_raw / np.linalg.norm(query_raw)  # unit vector
+
+            # ── Method 1: Brute-force Python loop (current path) ──────────────
+            brute_times = []
+            brute_result = None
+            for _ in range(iterations):
+                t0 = time_lib.perf_counter()
+                scores = [
+                    (name, cosine_similarity(query_vec, emb))
+                    for _, name, emb in profiles
+                ]
+                scores.sort(key=lambda x: x[1], reverse=True)
+                top = scores[:top_k]
+                brute_times.append((time_lib.perf_counter() - t0) * 1000)
+            brute_result = top
+
+            brute_avg_ms = round(sum(brute_times) / len(brute_times), 3)
+            brute_min_ms = round(min(brute_times), 3)
+            brute_max_ms = round(max(brute_times), 3)
+
+            # ── Method 2: pgvector ANN (optional — requires migration) ─────────
+            pgvector_available = False
+            pgvector_avg_ms = None
+            pgvector_min_ms = None
+            pgvector_max_ms = None
+            pgvector_result = None
+            pgvector_note = "Run infra/docker/migrate_pgvector.sql + scripts/migrate_embeddings.py to enable."
+
+            try:
+                # Check extension + column
+                cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+                has_ext = cur.fetchone() is not None
+                cur.execute(
+                    "SELECT COUNT(*) as cnt FROM person_profiles WHERE embedding_vec IS NOT NULL"
+                )
+                vec_count = cur.fetchone()["cnt"]
+
+                if has_ext and vec_count > 0:
+                    pgvector_available = True
+                    # Format query as pgvector literal
+                    vec_literal = "[" + ",".join(f"{v:.8f}" for v in query_vec.tolist()) + "]"
+
+                    pg_times = []
+                    for _ in range(iterations):
+                        t0 = time_lib.perf_counter()
+                        cur.execute(
+                            """
+                            SELECT p.name,
+                                   1 - (pp.embedding_vec <=> %s::vector) AS similarity
+                            FROM person_profiles pp
+                            JOIN persons p ON pp.person_id = p.id
+                            WHERE pp.embedding_vec IS NOT NULL
+                            ORDER BY pp.embedding_vec <=> %s::vector
+                            LIMIT %s
+                            """,
+                            (vec_literal, vec_literal, top_k)
+                        )
+                        rows = cur.fetchall()
+                        pg_times.append((time_lib.perf_counter() - t0) * 1000)
+                    pgvector_result = [{"name": r["name"], "score": round(r["similarity"], 4)} for r in rows]
+                    pgvector_avg_ms = round(sum(pg_times) / len(pg_times), 3)
+                    pgvector_min_ms = round(min(pg_times), 3)
+                    pgvector_max_ms = round(max(pg_times), 3)
+                    pgvector_note = f"IVFFlat index active ({vec_count} vectors indexed)."
+                elif has_ext and vec_count == 0:
+                    pgvector_note = "pgvector extension installed but embedding_vec not populated. Run scripts/migrate_embeddings.py."
+            except Exception as pg_exc:
+                pgvector_note = f"pgvector unavailable: {pg_exc}"
+
+            # ── Scaling projections ────────────────────────────────────────────
+            # Brute-force scales linearly: at 10× profiles, expect 10× latency.
+            # pgvector IVFFlat scales sub-linearly: O(sqrt(n) * probes).
+            bytes_per_embedding = 512 * 4  # 512 float32
+            mem_mb_current = round(profile_count * bytes_per_embedding / 1e6, 3)
+            mem_mb_at_10k = round(10_000 * bytes_per_embedding / 1e6, 1)
+            mem_mb_at_100k = round(100_000 * bytes_per_embedding / 1e6, 1)
+
+            projected_brute_10k_ms = round(brute_avg_ms * (10_000 / max(profile_count, 1)), 1)
+            projected_brute_100k_ms = round(brute_avg_ms * (100_000 / max(profile_count, 1)), 1)
+
+            return {
+                "profile_count": profile_count,
+                "query": {
+                    "embedding_dim": 512,
+                    "top_k": top_k,
+                    "iterations": iterations,
+                    "note": "Random unit vector (seed=42) — representative of a real query embedding shape",
+                },
+                "brute_force": {
+                    "description": "Current production path: load all embeddings into Python, O(n) cosine loop",
+                    "avg_ms": brute_avg_ms,
+                    "min_ms": brute_min_ms,
+                    "max_ms": brute_max_ms,
+                    "top_matches": [{"name": n, "score": round(s, 4)} for n, s in brute_result],
+                    "memory_loaded_mb": mem_mb_current,
+                },
+                "pgvector_ann": {
+                    "description": "pgvector IVFFlat ANN: O(sqrt(n)) approx search inside PostgreSQL",
+                    "available": pgvector_available,
+                    "avg_ms": pgvector_avg_ms,
+                    "min_ms": pgvector_min_ms,
+                    "max_ms": pgvector_max_ms,
+                    "top_matches": pgvector_result,
+                    "note": pgvector_note,
+                },
+                "scaling_analysis": {
+                    "current_profile_count": profile_count,
+                    "current_memory_mb": mem_mb_current,
+                    "brute_force_linear_projection": {
+                        "at_10k_profiles_ms": projected_brute_10k_ms,
+                        "at_100k_profiles_ms": projected_brute_100k_ms,
+                        "at_10k_memory_mb": mem_mb_at_10k,
+                        "at_100k_memory_mb": mem_mb_at_100k,
+                    },
+                    "migration_trigger": (
+                        "Migrate to pgvector IVFFlat when profile_count > 10,000 "
+                        "OR brute_force avg_ms > 20ms (degrades ingest p99 latency)."
+                    ),
+                    "pgvector_index_type": "IVFFlat (lists=100) — see migrate_pgvector.sql for HNSW alternative",
+                },
+            }
+
+    except Exception as e:
+        logger.error(f"Benchmark failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Benchmark failed: {e}")
+
+
+# ============================================================================
+# Operational pipeline report
+# ============================================================================
+
+@router.get("/report")
+def pipeline_report():
+    """Operational summary report for the ingestion pipeline.
+
+    Returns aggregate metrics across all processed events: throughput,
+    match rate, error rate, dead-letter queue depth, cache performance,
+    and pool utilization.  Designed to give an at-a-glance view of
+    pipeline health suitable for an operations review or incident triage.
+
+    Tesla relevance: equivalent to a daily telemetry health digest —
+    how many frames were processed, what fraction were successfully
+    classified, how many went to the dead-letter queue, what is the
+    p95 processing latency.
+    """
+    from app.db import get_pool_status
+    from app.cache import get_cached
+
+    try:
+        with get_cursor() as cur:
+            # ── Ingestion throughput ──────────────────────────────────────────
+            cur.execute("SELECT COUNT(*) AS cnt FROM processed_images")
+            total_processed = cur.fetchone()["cnt"]
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM processed_images WHERE processed_at >= NOW() - INTERVAL '24 hours'"
+            )
+            processed_24h = cur.fetchone()["cnt"]
+
+            # ── Graph stats ───────────────────────────────────────────────────
+            cur.execute("SELECT COUNT(*) AS cnt FROM persons WHERE name NOT LIKE 'UNKNOWN_%'")
+            known_persons = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM persons WHERE name LIKE 'UNKNOWN_%'")
+            unknown_persons = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM edges")
+            total_edges = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT SUM(weight) AS total FROM edges")
+            total_cooccurrences = cur.fetchone()["total"] or 0
+
+            # ── Match rate (from faces table) ─────────────────────────────────
+            cur.execute("SELECT COUNT(*) AS cnt FROM faces")
+            total_faces = cur.fetchone()["cnt"]
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM faces WHERE matched_person_id IS NOT NULL AND score >= 0.45"
+            )
+            matched_faces = cur.fetchone()["cnt"]
+
+            match_rate = round(matched_faces / total_faces, 4) if total_faces > 0 else 0.0
+
+            # ── Dead-letter queue ─────────────────────────────────────────────
+            dead_letter_exists = False
+            dead_letter_stats: dict = {}
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM failed_ingests WHERE NOT resolved"
+                )
+                unresolved = cur.fetchone()["cnt"]
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM failed_ingests")
+                total_failed = cur.fetchone()["cnt"]
+
+                cur.execute(
+                    """
+                    SELECT error_stage, COUNT(*) AS cnt
+                    FROM failed_ingests WHERE NOT resolved
+                    GROUP BY error_stage ORDER BY cnt DESC
+                    """
+                )
+                by_stage = {r["error_stage"]: r["cnt"] for r in cur.fetchall()}
+
+                dead_letter_stats = {
+                    "total_failed": total_failed,
+                    "unresolved": unresolved,
+                    "by_stage": by_stage,
+                }
+                dead_letter_exists = True
+            except Exception:
+                dead_letter_stats = {
+                    "note": "Run infra/docker/migrate_failed_ingests.sql to enable dead-letter tracking"
+                }
+
+            # ── Model version distribution ────────────────────────────────────
+            cur.execute(
+                """
+                SELECT model_version, COUNT(*) AS cnt
+                FROM edge_evidence
+                GROUP BY model_version ORDER BY cnt DESC
+                LIMIT 5
+                """
+            )
+            model_dist = {r["model_version"]: r["cnt"] for r in cur.fetchall()}
+
+            # ── Pool status ───────────────────────────────────────────────────
+            pool = get_pool_status()
+
+        return {
+            "report_generated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "ingestion": {
+                "total_images_processed": total_processed,
+                "processed_last_24h": processed_24h,
+                "total_faces_detected": total_faces,
+                "total_faces_matched": matched_faces,
+                "match_rate": match_rate,
+                "total_edges": total_edges,
+                "total_cooccurrences": int(total_cooccurrences),
+            },
+            "identity_corpus": {
+                "known_persons": known_persons,
+                "unknown_persons": unknown_persons,
+                "total_persons": known_persons + unknown_persons,
+            },
+            "model_versions": model_dist,
+            "dead_letter_queue": dead_letter_stats,
+            "infrastructure": {
+                "db_pool": pool,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Report failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Report failed: {e}")
+
+
+# ============================================================================
+# Dead-letter retry
+# ============================================================================
+
+@router.post("/retry-failed")
+def retry_failed_ingests(limit: int = 50):
+    """Retry items in the dead-letter queue (failed_ingests).
+
+    Re-runs the ingestion pipeline for every unresolved failed ingest whose
+    retry_count < max_retries.  On success the record is marked resolved;
+    on failure retry_count is incremented and last_attempted is updated.
+
+    Args:
+        limit: Max number of failed items to attempt in a single call (default 50).
+
+    Returns:
+        Summary of retried, resolved, and still-failing items.
+
+    Tesla analog: a telemetry quarantine worker that periodically re-tries
+    frames that failed cloud-side processing — with a bounded retry count
+    to avoid infinite loops on permanently corrupt frames.
+    """
+    from app.routes.ingest import (
+        ensure_tables_exist,
+        load_profile_embeddings,
+        process_single_image,
+        MODEL_VERSION,
+    )
+
+    retried = 0
+    resolved = 0
+    still_failing = 0
+    exhausted = 0
+    results = []
+
+    try:
+        with get_cursor() as cur:
+            ensure_tables_exist(cur)
+
+            # Fetch candidates: unresolved, retries remaining
+            cur.execute(
+                """
+                SELECT id, filename, error_stage, retry_count, max_retries
+                FROM failed_ingests
+                WHERE NOT resolved AND retry_count < max_retries
+                ORDER BY last_attempted ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            candidates = cur.fetchall()
+
+            if not candidates:
+                return {
+                    "status": "ok",
+                    "message": "No retryable failed ingests found",
+                    "retried": 0,
+                    "resolved": 0,
+                    "still_failing": 0,
+                }
+
+            profiles = load_profile_embeddings(cur)
+
+            for row in candidates:
+                fail_id = str(row["id"])
+                filename = row["filename"]
+                retried += 1
+
+                image_path = UPLOADS_DIR / filename
+
+                if not image_path.exists():
+                    # File is gone — mark exhausted rather than retry forever
+                    cur.execute(
+                        """
+                        UPDATE failed_ingests
+                        SET retry_count = max_retries,
+                            error_message = 'File not found during retry',
+                            last_attempted = NOW()
+                        WHERE id = %s
+                        """,
+                        (fail_id,),
+                    )
+                    exhausted += 1
+                    results.append({"filename": filename, "status": "exhausted", "reason": "file_not_found"})
+                    continue
+
+                # Delete from processed_images so process_single_image can run
+                cur.execute("DELETE FROM processed_images WHERE filename = %s", (filename,))
+
+                try:
+                    stats = process_single_image(cur, image_path, profiles)
+                    # Mark resolved
+                    cur.execute(
+                        """
+                        UPDATE failed_ingests
+                        SET resolved = TRUE,
+                            resolved_at = NOW(),
+                            retry_count = retry_count + 1,
+                            last_attempted = NOW()
+                        WHERE id = %s
+                        """,
+                        (fail_id,),
+                    )
+                    resolved += 1
+                    results.append({"filename": filename, "status": "resolved", **stats})
+
+                except Exception as e:
+                    cur.execute(
+                        """
+                        UPDATE failed_ingests
+                        SET retry_count = retry_count + 1,
+                            error_message = %s,
+                            last_attempted = NOW()
+                        WHERE id = %s
+                        """,
+                        (str(e)[:2000], fail_id),
+                    )
+                    still_failing += 1
+                    results.append({"filename": filename, "status": "failed_again", "error": str(e)})
+
+        return {
+            "status": "completed",
+            "retried": retried,
+            "resolved": resolved,
+            "still_failing": still_failing,
+            "exhausted": exhausted,
+            "results": results,
+        }
+
+    except Exception as e:
+        logger.error(f"retry-failed failed: {e}")
+        raise HTTPException(status_code=500, detail=f"retry-failed failed: {e}")

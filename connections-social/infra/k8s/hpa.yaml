@@ -1,0 +1,72 @@
+---
+# HorizontalPodAutoscaler — scales replicas based on CPU utilization.
+#
+# Why 70% CPU target?
+#   InsightFace inference is CPU-bound. At 70% utilization there is still
+#   30% headroom to absorb a burst before latency degrades. Targeting 90%+
+#   causes latency spikes because scaling takes 30-60 seconds to provision
+#   new pods and load the ML model.
+#
+# Why min=2?
+#   Single replica = single point of failure during rolling deploys.
+#   Two replicas guarantee zero-downtime deployments (maxUnavailable=0 in
+#   the Deployment strategy).
+#
+# Why max=10?
+#   Bounded by: PostgreSQL max_connections / pool_max (100 / 10 = 10 pods).
+#   Exceeding this would exhaust the DB connection limit. This is a hard
+#   architectural constraint that motivates a PgBouncer connection pooler
+#   or a read replica for graph query traffic at higher scale.
+#
+# Interview talking point: the ML model is the actual bottleneck, not the
+# API logic. At Tesla's scale, you'd separate the embedding inference into
+# a dedicated GPU-accelerated worker (separate Deployment, separate HPA
+# targeting GPU utilization) so you can scale API pods and GPU workers
+# independently — matching their very different cost and throughput profiles.
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: connections-backend-hpa
+  namespace: connections
+  labels:
+    app: connections-backend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: connections-backend
+
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # Scale out when avg CPU > 70%
+
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80   # Scale out when avg memory > 80%
+
+  behavior:
+    scaleUp:
+      # Scale up fast to absorb burst traffic
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2          # Add at most 2 pods per scaling event
+          periodSeconds: 30
+    scaleDown:
+      # Scale down slowly to avoid oscillation
+      stabilizationWindowSeconds: 300   # Wait 5 minutes before scaling down
+      policies:
+        - type: Pods
+          value: 1          # Remove at most 1 pod per scaling event
+          periodSeconds: 60

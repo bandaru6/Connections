@@ -1,0 +1,29 @@
+---
+# PersistentVolumeClaim — shared storage for uploaded observation images.
+#
+# Why PVC for uploads?
+#   Uploaded images (the raw observation inputs) must persist across pod
+#   restarts and be accessible to all replicas (for the StaticFiles mount
+#   at /images/{filename}).  A PVC backed by ReadWriteMany storage (NFS,
+#   EFS on AWS, Filestore on GCP) satisfies this.
+#
+# Production note: for Tesla-scale data volumes, you would NOT store raw
+# images in a PVC. Instead, upload directly to object storage (S3/GCS),
+# store only the S3 URI in the database, and serve via a CDN or pre-signed
+# URLs. The PVC approach is appropriate for this demo-scale project.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: connections-uploads-pvc
+  namespace: connections
+  labels:
+    app: connections-backend
+spec:
+  accessModes:
+    - ReadWriteMany   # Required for multi-replica access
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: efs-sc   # Uncomment for AWS EFS
+  # storageClassName: standard # Use for single-node / local dev testing

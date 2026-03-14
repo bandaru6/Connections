@@ -1,0 +1,29 @@
+---
+# Service — exposes the backend Deployment inside the cluster.
+#
+# ClusterIP (default): reachable only within the cluster.
+# External traffic enters via the Ingress (see ingress.yaml), which
+# terminates TLS and routes to this Service.
+#
+# Interview talking point: using ClusterIP + Ingress rather than NodePort
+# or LoadBalancer per service is the standard pattern for cost efficiency
+# in a multi-service cluster — one cloud load balancer (the Ingress controller)
+# serves all services rather than one per service.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: connections-backend
+  namespace: connections
+  labels:
+    app: connections-backend
+    tier: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: connections-backend   # Routes to pods with this label
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
