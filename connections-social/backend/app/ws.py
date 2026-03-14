@@ -24,9 +24,8 @@ Usage (browser / wscat):
 
 import json
 import logging
-from typing import Set
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ class ConnectionManager:
     """Manages a set of active WebSocket connections."""
 
     def __init__(self):
-        self.active: Set[WebSocket] = set()
+        self.active: set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -48,7 +47,7 @@ class ConnectionManager:
 
     async def broadcast(self, payload: dict) -> None:
         """Send payload to all connected clients, pruning dead connections."""
-        dead: Set[WebSocket] = set()
+        dead: set[WebSocket] = set()
         message = json.dumps(payload, default=str)
 
         for ws in list(self.active):

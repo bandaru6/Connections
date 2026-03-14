@@ -2,28 +2,26 @@
 
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import Depends, FastAPI
-from fastapi.staticfiles import StaticFiles
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from app.auth import require_api_key
 from app.config import UPLOADS_DIR
 from app.db import check_db_connection, close_pool, get_pool_status
-from app.routes import admin, ingest, graph, profiles, jobs, search
-from app.auth import require_api_key
-from app.rate_limit import RateLimitMiddleware
-from app.ws import manager as ws_manager
-from fastapi import WebSocket, WebSocketDisconnect
 
 # Import observability components
 from app.observability import (
-    configure_logging,
     ObservabilityMiddleware,
+    configure_logging,
     metrics_router,
 )
 from app.observability.tracing import init_tracing
+from app.rate_limit import RateLimitMiddleware
+from app.routes import admin, graph, ingest, jobs, profiles, search
+from app.ws import manager as ws_manager
 
 # Configure structured logging
 configure_logging()
@@ -173,6 +171,7 @@ def health_check():
     on a transient dependency outage — use /ready for traffic gating instead.
     """
     import redis as redis_lib
+
     from app.config import REDIS_URL
 
     db_ok = check_db_connection()
@@ -203,6 +202,7 @@ def readiness_check():
     """
     import redis as redis_lib
     from fastapi import HTTPException
+
     from app.config import REDIS_URL
     from app.routes.ingest import _face_app  # ML model singleton
 
@@ -250,11 +250,13 @@ def system_info():
     """
     import os
     import time as time_lib
+
     import psutil
     import redis as redis_lib
+
     from app.config import REDIS_URL
+    from app.db import get_cursor, get_pool_status
     from app.routes.ingest import _face_app
-    from app.db import get_pool_status, get_cursor
 
     proc = psutil.Process(os.getpid())
     mem = proc.memory_info()

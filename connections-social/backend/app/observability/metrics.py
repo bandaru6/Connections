@@ -1,14 +1,13 @@
 """Prometheus metrics for Connections Social backend."""
 
-from typing import Callable
 from fastapi import APIRouter, Response
 from prometheus_client import (
-    Counter,
-    Histogram,
-    Gauge,
-    generate_latest,
     CONTENT_TYPE_LATEST,
     REGISTRY,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
 )
 
 from app.observability.config import config

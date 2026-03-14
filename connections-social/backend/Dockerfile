@@ -4,9 +4,13 @@
 
 FROM --platform=linux/amd64 python:3.11-slim-bullseye
 
-# Install minimal dependencies
+# Install system dependencies.
+# build-essential + python3-dev are required to compile insightface's Cython
+# extension (mesh_core_cython).  The slim base image does not ship a C++ compiler.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        build-essential \
+        python3-dev \
         libpq5 \
         libglib2.0-0 \
         libgl1-mesa-glx \

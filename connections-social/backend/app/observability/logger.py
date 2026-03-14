@@ -5,7 +5,6 @@ import logging
 import sys
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Optional
 
 from app.observability.config import config
 
@@ -111,7 +110,7 @@ class RequestLogger:
         self,
         logger: logging.Logger,
         request_id: str,
-        trace_id: Optional[str] = None
+        trace_id: str | None = None
     ):
         self.logger = logger
         self.request_id = request_id
@@ -149,10 +148,10 @@ def log_request(
     latency_ms: float,
     client_ip: str,
     user_agent: str,
-    bytes_in: Optional[int] = None,
-    bytes_out: Optional[int] = None,
-    trace_id: Optional[str] = None,
-    endpoint: Optional[str] = None,
+    bytes_in: int | None = None,
+    bytes_out: int | None = None,
+    trace_id: str | None = None,
+    endpoint: str | None = None,
 ) -> None:
     """Log a completed request."""
     logger = get_logger("request")
@@ -187,7 +186,7 @@ def log_request(
 def log_exception(
     request_id: str,
     exception: Exception,
-    trace_id: Optional[str] = None,
+    trace_id: str | None = None,
 ) -> None:
     """Log an unhandled exception."""
     logger = get_logger("error")

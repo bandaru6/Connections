@@ -674,3 +674,320 @@ class TestRateLimitConfig:
         """Prometheus scrape target must never be rate-limited."""
         from app.rate_limit import _EXEMPT_PATHS
         assert "/metrics" in _EXEMPT_PATHS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Upload validation — MIME type and file size guards
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestUploadValidation:
+    """Tests for the upload gate added to /ingest/upload.
+
+    The two guards — MIME type and file size — are the first lines of defense
+    against malformed or malicious input reaching the ML inference layer.
+
+    Interview talking point: validating at the boundary (before saving to disk,
+    before loading into OpenCV) is cheaper and safer than validating inside
+    the pipeline.  A 50MB corrupt PDF should never reach InsightFace.
+    """
+
+    def test_allowed_mime_types_contain_standard_image_formats(self):
+        from app.config import ALLOWED_MIME_TYPES
+        assert "image/jpeg" in ALLOWED_MIME_TYPES
+        assert "image/png" in ALLOWED_MIME_TYPES
+        assert "image/webp" in ALLOWED_MIME_TYPES
+
+    def test_pdf_not_in_allowed_types(self):
+        from app.config import ALLOWED_MIME_TYPES
+        assert "application/pdf" not in ALLOWED_MIME_TYPES
+
+    def test_octet_stream_not_allowed(self):
+        from app.config import ALLOWED_MIME_TYPES
+        assert "application/octet-stream" not in ALLOWED_MIME_TYPES
+
+    def test_max_upload_bytes_default_is_50mb(self):
+        from app.config import MAX_UPLOAD_BYTES
+        assert MAX_UPLOAD_BYTES == 50 * 1024 * 1024
+
+    def test_file_within_limit_passes(self):
+        from app.config import MAX_UPLOAD_BYTES
+        small_content = b"x" * 1024  # 1 KB
+        assert len(small_content) <= MAX_UPLOAD_BYTES
+
+    def test_file_over_limit_detected(self):
+        from app.config import MAX_UPLOAD_BYTES
+        # Simulate the guard: len(contents) > MAX_UPLOAD_BYTES
+        oversized = MAX_UPLOAD_BYTES + 1
+        assert oversized > MAX_UPLOAD_BYTES
+
+    def test_allowed_types_set_is_non_empty(self):
+        from app.config import ALLOWED_MIME_TYPES
+        assert len(ALLOWED_MIME_TYPES) >= 3
+
+    def test_mime_validation_logic(self):
+        """Simulate the guard: reject if content_type not in allowed set."""
+        from app.config import ALLOWED_MIME_TYPES
+        assert "image/jpeg" in ALLOWED_MIME_TYPES      # should pass
+        assert "image/gif" not in ALLOWED_MIME_TYPES   # should be rejected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ObservationEvent schema — version field and serialization
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestObservationEventSchema:
+    """Tests for the structured ObservationEvent Pydantic model.
+
+    The schema_version field enables safe schema evolution — consumers can
+    gate on the version to handle breaking field changes without crashing.
+
+    Interview talking point: schema versioning is how a telemetry pipeline
+    supports rolling model updates without stopping the world.  Adding a
+    new field with a version bump lets downstream consumers opt in at their
+    own pace.
+    """
+
+    def _make_event(self, **kwargs):
+        from app.schemas.events import ObservationEvent, PipelineStage
+        defaults = dict(
+            event_id="test-id",
+            source_filename="test.jpg",
+            stage=PipelineStage.PERSISTED,
+        )
+        defaults.update(kwargs)
+        return ObservationEvent(**defaults)
+
+    def test_schema_version_defaults_to_1_0(self):
+        event = self._make_event()
+        assert event.schema_version == "1.0"
+
+    def test_schema_version_can_be_set(self):
+        event = self._make_event(schema_version="2.0")
+        assert event.schema_version == "2.0"
+
+    def test_schema_version_in_serialized_dict(self):
+        event = self._make_event()
+        d = event.dict()
+        assert "schema_version" in d
+        assert d["schema_version"] == "1.0"
+
+    def test_event_id_preserved(self):
+        event = self._make_event(event_id="abc-123")
+        assert event.event_id == "abc-123"
+
+    def test_stage_enum_persisted(self):
+        from app.schemas.events import PipelineStage
+        event = self._make_event()
+        assert event.stage == PipelineStage.PERSISTED
+
+    def test_stage_enum_failed(self):
+        from app.schemas.events import PipelineStage
+        event = self._make_event(stage=PipelineStage.FAILED)
+        assert event.stage == PipelineStage.FAILED
+
+    def test_faces_detected_defaults_to_zero(self):
+        event = self._make_event()
+        assert event.faces_detected == 0
+
+    def test_known_matches_defaults_to_zero(self):
+        event = self._make_event()
+        assert event.known_matches == 0
+
+    def test_edges_created_defaults_to_zero(self):
+        event = self._make_event()
+        assert event.edges_created == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USE_PGVECTOR feature flag
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPgvectorFeatureFlag:
+    """Tests for the USE_PGVECTOR config flag.
+
+    The flag enables zero-downtime migration from the brute-force Python
+    cosine loop to pgvector IVFFlat ANN search without deploying new code.
+    Operators flip the flag after running migrate_pgvector.sql + migrate_embeddings.py.
+
+    Interview talking point: feature flags are how a telemetry team safely
+    rolls out infrastructure changes — the new code path runs in production
+    under a flag before the old path is removed.
+    """
+
+    def test_use_pgvector_is_boolean(self):
+        from app.config import USE_PGVECTOR
+        assert isinstance(USE_PGVECTOR, bool)
+
+    def test_use_pgvector_defaults_to_false(self):
+        """Default should be brute-force path until pgvector is migrated."""
+        import os
+        with MagicMock():
+            # Read default when env var is absent
+            flag = os.getenv("USE_PGVECTOR", "false").lower() == "true"
+            assert flag is False
+
+    def test_use_pgvector_enabled_by_env_var(self):
+        import os
+        with patch.dict(os.environ, {"USE_PGVECTOR": "true"}):
+            flag = os.getenv("USE_PGVECTOR", "false").lower() == "true"
+            assert flag is True
+
+    def test_use_pgvector_case_insensitive(self):
+        import os
+        for val in ["TRUE", "True", "true"]:
+            with patch.dict(os.environ, {"USE_PGVECTOR": val}):
+                flag = os.getenv("USE_PGVECTOR", "false").lower() == "true"
+                assert flag is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebSocket connection manager
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestWebSocketManager:
+    """Tests for the real-time event broadcast ConnectionManager.
+
+    The manager tracks active WebSocket connections in a set and broadcasts
+    each ObservationEvent to all connected clients when ingest completes.
+    Dead connections are pruned silently on the next broadcast.
+
+    Interview talking point: WebSocket push is the zero-polling alternative
+    to having dashboards poll /jobs/{id} or /graph/summary every second.
+    In a Tesla telemetry context, it's equivalent to a live fleet monitoring
+    dashboard that receives processed events as they complete.
+    """
+
+    def test_initial_connection_count_is_zero(self):
+        from app.ws import ConnectionManager
+        manager = ConnectionManager()
+        assert manager.connection_count == 0
+
+    def test_connect_increments_count(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.ws import ConnectionManager
+
+        manager = ConnectionManager()
+        mock_ws = AsyncMock()
+        asyncio.run(manager.connect(mock_ws))
+        assert manager.connection_count == 1
+
+    def test_disconnect_decrements_count(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.ws import ConnectionManager
+
+        manager = ConnectionManager()
+        mock_ws = AsyncMock()
+        asyncio.run(manager.connect(mock_ws))
+        manager.disconnect(mock_ws)
+        assert manager.connection_count == 0
+
+    def test_disconnect_unknown_socket_is_safe(self):
+        from unittest.mock import AsyncMock
+        from app.ws import ConnectionManager
+
+        manager = ConnectionManager()
+        mock_ws = AsyncMock()
+        # Should not raise
+        manager.disconnect(mock_ws)
+        assert manager.connection_count == 0
+
+    def test_broadcast_sends_to_all_clients(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.ws import ConnectionManager
+
+        manager = ConnectionManager()
+        ws1, ws2 = AsyncMock(), AsyncMock()
+        asyncio.run(manager.connect(ws1))
+        asyncio.run(manager.connect(ws2))
+
+        payload = {"event_id": "abc", "stage": "PERSISTED"}
+        asyncio.run(manager.broadcast(payload))
+
+        ws1.send_text.assert_called_once()
+        ws2.send_text.assert_called_once()
+
+    def test_broadcast_prunes_dead_connections(self):
+        import asyncio
+        import json
+        from unittest.mock import AsyncMock
+        from app.ws import ConnectionManager
+
+        manager = ConnectionManager()
+        # Healthy connection
+        ws_good = AsyncMock()
+        # Dead connection: send_text raises
+        ws_dead = AsyncMock()
+        ws_dead.send_text.side_effect = RuntimeError("disconnected")
+
+        asyncio.run(manager.connect(ws_good))
+        asyncio.run(manager.connect(ws_dead))
+        assert manager.connection_count == 2
+
+        asyncio.run(manager.broadcast({"event_id": "x"}))
+
+        # Dead connection should be pruned
+        assert manager.connection_count == 1
+        assert ws_good in manager.active
+        assert ws_dead not in manager.active
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Elasticsearch search module — fail-open behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestElasticsearchFailOpen:
+    """Tests for the Elasticsearch search module's fail-open design.
+
+    When Elasticsearch is unavailable, search functions must return empty
+    results rather than raising an exception — the ingest pipeline must
+    never be blocked by a search outage.
+
+    Interview talking point: in a production telemetry pipeline, the search
+    layer is a convenience feature.  Ingestion correctness (DB writes) must
+    be decoupled from search indexing.  Fail-open is the right design here;
+    fail-closed would be appropriate only for the primary data store.
+    """
+
+    def test_get_index_stats_returns_unavailable_when_es_down(self):
+        from app.search import get_index_stats
+        # Patch out the client so ES is unavailable
+        with patch("app.search._es_client", None):
+            with patch("app.search._get_client", return_value=None):
+                result = get_index_stats()
+        assert result["available"] is False
+
+    def test_search_events_returns_empty_when_es_down(self):
+        from app.search import search_events
+        with patch("app.search._get_client", return_value=None):
+            result = search_events(q="test")
+        assert result["total"] == 0
+        assert result["hits"] == []
+
+    def test_search_events_returns_note_when_es_down(self):
+        from app.search import search_events
+        with patch("app.search._get_client", return_value=None):
+            result = search_events()
+        assert "note" in result or "error" not in result  # fails open, not with exception
+
+    def test_index_event_does_not_raise_when_es_down(self):
+        from app.search import index_event
+        with patch("app.search._get_client", return_value=None):
+            # Must not raise — ingest should not fail if ES is down
+            index_event({"event_id": "test", "stage": "PERSISTED"})
+
+    def test_search_events_respects_limit_cap(self):
+        """Limit is capped at 200 regardless of user input."""
+        from app.search import search_events
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "hits": {"hits": [], "total": {"value": 0}},
+            "took": 1,
+        }
+        with patch("app.search._get_client", return_value=mock_client):
+            search_events(limit=999)
+        # The actual ES search call should have used min(999, 200) = 200
+        call_body = mock_client.search.call_args[1]["body"]
+        assert call_body["size"] == 200

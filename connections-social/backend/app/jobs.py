@@ -7,12 +7,12 @@ operations like batch image ingestion.
 import json
 import logging
 import threading
-import time
 import uuid
-from dataclasses import dataclass, asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import redis
 
@@ -35,7 +35,7 @@ class JobProgress:
     current: int = 0
     total: int = 0
     percentage: float = 0.0
-    current_item: Optional[str] = None
+    current_item: str | None = None
     items_succeeded: int = 0
     items_failed: int = 0
 
@@ -44,9 +44,9 @@ class JobProgress:
 class JobResult:
     """Result information for a completed job."""
     success: bool = True
-    data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    items: Optional[List[Dict[str, Any]]] = None
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    items: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -56,13 +56,13 @@ class Job:
     type: str
     status: JobStatus
     created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    progress: Optional[JobProgress] = None
-    result: Optional[JobResult] = None
-    metadata: Optional[Dict[str, Any]] = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    progress: JobProgress | None = None
+    result: JobResult | None = None
+    metadata: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert job to dictionary for JSON serialization."""
         data = {
             "id": self.id,
@@ -80,7 +80,7 @@ class Job:
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Job":
+    def from_dict(cls, data: dict[str, Any]) -> "Job":
         """Create job from dictionary."""
         progress = None
         if data.get("progress"):
@@ -119,11 +119,11 @@ class JobManager:
         """
         self.redis_url = redis_url
         self.job_ttl = job_ttl
-        self._redis: Optional[redis.Redis] = None
-        self._local_jobs: Dict[str, Job] = {}  # Fallback if Redis unavailable
+        self._redis: redis.Redis | None = None
+        self._local_jobs: dict[str, Job] = {}  # Fallback if Redis unavailable
 
     @property
-    def redis_client(self) -> Optional[redis.Redis]:
+    def redis_client(self) -> redis.Redis | None:
         """Get Redis client, connecting on first use."""
         if self._redis is None:
             try:
@@ -161,7 +161,7 @@ class JobManager:
         # Fallback to memory
         self._local_jobs[job.id] = job
 
-    def _load_job(self, job_id: str) -> Optional[Job]:
+    def _load_job(self, job_id: str) -> Job | None:
         """Load job state from storage."""
         client = self.redis_client
         if client:
@@ -178,7 +178,7 @@ class JobManager:
     def create_job(
         self,
         job_type: str,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: dict[str, Any] | None = None
     ) -> Job:
         """Create a new job record.
 
@@ -200,7 +200,7 @@ class JobManager:
         logger.info(f"Created job {job.id} of type {job_type}")
         return job
 
-    def get_job(self, job_id: str) -> Optional[Job]:
+    def get_job(self, job_id: str) -> Job | None:
         """Get job by ID.
 
         Args:
@@ -215,9 +215,9 @@ class JobManager:
         self,
         job_id: str,
         status: JobStatus,
-        started_at: Optional[str] = None,
-        completed_at: Optional[str] = None,
-    ) -> Optional[Job]:
+        started_at: str | None = None,
+        completed_at: str | None = None,
+    ) -> Job | None:
         """Update job status.
 
         Args:
@@ -247,10 +247,10 @@ class JobManager:
         job_id: str,
         current: int,
         total: int,
-        current_item: Optional[str] = None,
+        current_item: str | None = None,
         items_succeeded: int = 0,
         items_failed: int = 0,
-    ) -> Optional[Job]:
+    ) -> Job | None:
         """Update job progress.
 
         Args:
@@ -286,10 +286,10 @@ class JobManager:
         self,
         job_id: str,
         success: bool = True,
-        data: Optional[Dict[str, Any]] = None,
-        error: Optional[str] = None,
-        items: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[Job]:
+        data: dict[str, Any] | None = None,
+        error: str | None = None,
+        items: list[dict[str, Any]] | None = None,
+    ) -> Job | None:
         """Mark job as completed.
 
         Args:

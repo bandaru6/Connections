@@ -7,9 +7,9 @@ Provides:
 """
 
 from app.observability.config import ObservabilityConfig
-from app.observability.logger import get_logger, configure_logging
+from app.observability.logger import configure_logging, get_logger
+from app.observability.metrics import metrics_router, track_error, track_request
 from app.observability.middleware import ObservabilityMiddleware
-from app.observability.metrics import metrics_router, track_request, track_error
 
 __all__ = [
     "ObservabilityConfig",

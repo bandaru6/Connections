@@ -4,7 +4,6 @@ import logging
 import os
 import struct
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -21,6 +20,7 @@ PROFILE_MATCH_THRESHOLD = float(os.getenv("PROFILE_MATCH_THRESHOLD", "0.50"))
 
 # Directory to store profile images (use project-relative path from config)
 from app.config import PROFILES_DIR
+
 PROFILE_IMAGES_DIR = PROFILES_DIR
 
 # Global face analysis model (lazy loaded)
@@ -57,7 +57,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def extract_largest_face(image_path: Path) -> Tuple[Optional[np.ndarray], Optional[str]]:
+def extract_largest_face(image_path: Path) -> tuple[np.ndarray | None, str | None]:
     """
     Extract the largest face embedding from an image.
     Returns (embedding, None) on success or (None, error_message) on failure.
@@ -83,7 +83,7 @@ def extract_largest_face(image_path: Path) -> Tuple[Optional[np.ndarray], Option
         return None, f"Error processing {image_path.name}: {e}"
 
 
-def load_all_profile_embeddings(cur) -> List[Tuple[str, str, np.ndarray]]:
+def load_all_profile_embeddings(cur) -> list[tuple[str, str, np.ndarray]]:
     """Load all profile embeddings from database.
     Returns list of (person_id, person_name, embedding).
     """
@@ -104,8 +104,8 @@ def load_all_profile_embeddings(cur) -> List[Tuple[str, str, np.ndarray]]:
 
 def find_best_match(
     embedding: np.ndarray,
-    profiles: List[Tuple[str, str, np.ndarray]]
-) -> Tuple[Optional[str], float]:
+    profiles: list[tuple[str, str, np.ndarray]]
+) -> tuple[str | None, float]:
     """
     Find the best matching profile for an embedding.
     Returns (person_name, best_score) or (None, 0.0) if no profiles.
@@ -118,7 +118,7 @@ def find_best_match(
 
     # Group by person and take max similarity per person
     scores_by_person = {}
-    for person_id, person_name, profile_emb in profiles:
+    for _person_id, person_name, profile_emb in profiles:
         sim = cosine_similarity(embedding, profile_emb)
         if person_name not in scores_by_person or sim > scores_by_person[person_name]:
             scores_by_person[person_name] = sim
@@ -218,7 +218,7 @@ async def check_match(image: UploadFile = File(...)):
 @router.post("/create")
 async def create_profile(
     name: str = Form(...),
-    images: List[UploadFile] = File(...),
+    images: list[UploadFile] = File(...),
     confirm: bool = Form(False),
     mode: str = Form("new")  # "new" or "merge"
 ):

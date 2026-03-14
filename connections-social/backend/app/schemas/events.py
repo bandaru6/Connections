@@ -29,9 +29,8 @@ Tesla Autonomy Telemetry analogy
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
-from pydantic import BaseModel, Field
 
+from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline stage lifecycle
@@ -108,7 +107,7 @@ class DetectionResult(BaseModel):
     how it was identified, and the latency of the detection step.
     """
     face_index: int = Field(..., description="Zero-based index of this face in the image")
-    bounding_box: Optional[BoundingBox] = Field(
+    bounding_box: BoundingBox | None = Field(
         None,
         description="Pixel coordinates of the detected face"
     )
@@ -185,11 +184,11 @@ class ObservationEvent(BaseModel):
 
     # Pipeline lifecycle
     stage: PipelineStage = Field(..., description="Final stage reached by this event")
-    skipped_reason: Optional[str] = Field(
+    skipped_reason: str | None = Field(
         None,
         description="If stage=SKIPPED, explains why (e.g. 'already_processed')"
     )
-    error_message: Optional[str] = Field(
+    error_message: str | None = Field(
         None,
         description="If stage=FAILED, the error that caused the failure"
     )
@@ -199,7 +198,7 @@ class ObservationEvent(BaseModel):
         default=0,
         description="Total faces detected by the face detection model"
     )
-    detections: List[DetectionResult] = Field(
+    detections: list[DetectionResult] = Field(
         default_factory=list,
         description="Per-face detection and classification results"
     )
@@ -217,7 +216,7 @@ class ObservationEvent(BaseModel):
         default=0,
         description="New or updated co-occurrence edges written to the graph"
     )
-    edge_provenance: List[EdgeProvenance] = Field(
+    edge_provenance: list[EdgeProvenance] = Field(
         default_factory=list,
         description="Lineage records for each edge created/updated"
     )
@@ -289,7 +288,7 @@ class PipelineSummary(BaseModel):
     )
 
     @classmethod
-    def from_events(cls, events: List[ObservationEvent], total_ms: float) -> "PipelineSummary":
+    def from_events(cls, events: list[ObservationEvent], total_ms: float) -> "PipelineSummary":
         """Aggregate a list of ObservationEvents into a batch summary."""
         processed = sum(1 for e in events if e.stage == PipelineStage.PERSISTED)
         skipped = sum(1 for e in events if e.stage == PipelineStage.SKIPPED)

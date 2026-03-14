@@ -2,15 +2,14 @@
 
 import time
 import uuid
-from typing import Callable, Optional
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import ASGIApp
 
 from app.observability.config import config
-from app.observability.logger import log_request, log_exception, get_logger
-from app.observability.metrics import track_request, track_error, track_in_flight
+from app.observability.logger import get_logger, log_exception, log_request
+from app.observability.metrics import track_error, track_in_flight, track_request
 from app.observability.tracing import get_trace_id
 
 logger = get_logger(__name__)
@@ -143,7 +142,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
 
         return "unknown"
 
-    def _get_content_length(self, request: Request) -> Optional[int]:
+    def _get_content_length(self, request: Request) -> int | None:
         """Get request content length if available."""
         content_length = request.headers.get("Content-Length")
         if content_length:
@@ -153,7 +152,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 pass
         return None
 
-    def _get_response_content_length(self, response: Response) -> Optional[int]:
+    def _get_response_content_length(self, response: Response) -> int | None:
         """Get response content length if available."""
         content_length = response.headers.get("Content-Length")
         if content_length:
@@ -163,7 +162,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 pass
         return None
 
-    def _get_endpoint_name(self, request: Request) -> Optional[str]:
+    def _get_endpoint_name(self, request: Request) -> str | None:
         """Get the route/endpoint name if available."""
         # FastAPI stores route info in request scope
         route = request.scope.get("route")

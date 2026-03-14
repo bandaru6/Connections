@@ -18,27 +18,28 @@ import uuid
 from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.config import UPLOADS_DIR, INSIGHTFACE_MODEL, USE_PGVECTOR, MAX_UPLOAD_BYTES, ALLOWED_MIME_TYPES
-from app.db import get_cursor
 from app.cache import invalidate_graph_cache
+from app.circuit_breaker import CircuitBreakerOpen, insightface_breaker
+from app.config import (
+    ALLOWED_MIME_TYPES,
+    INSIGHTFACE_MODEL,
+    MAX_UPLOAD_BYTES,
+    UPLOADS_DIR,
+    USE_PGVECTOR,
+)
+from app.db import get_cursor
 from app.observability.tracing import create_span, trace_function
-from app.circuit_breaker import insightface_breaker, CircuitBreakerOpen
 from app.schemas.events import (
     ObservationEvent,
     PipelineStage,
-    DetectionResult,
-    MatchResult,
-    BoundingBox,
-    EdgeProvenance,
 )
-from app.ws import manager as ws_manager
 from app.search import index_event as es_index_event
+from app.ws import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -116,7 +117,7 @@ def mark_as_processed(cur, filename: str):
     )
 
 
-def load_profile_embeddings(cur) -> List[Tuple[str, str, np.ndarray]]:
+def load_profile_embeddings(cur) -> list[tuple[str, str, np.ndarray]]:
     """Load all profile embeddings from database.
 
     Returns list of (person_id, person_name, embedding).
@@ -165,7 +166,7 @@ def create_unknown_person(cur, unknown_id: str) -> str:
     return str(cur.fetchone()['id'])
 
 
-def get_person_by_name(cur, name: str) -> Optional[str]:
+def get_person_by_name(cur, name: str) -> str | None:
     """Get person UUID by name."""
     cur.execute("SELECT id FROM persons WHERE name = %s", (name,))
     row = cur.fetchone()
@@ -174,8 +175,8 @@ def get_person_by_name(cur, name: str) -> Optional[str]:
 
 def match_face_to_person(
     face_embedding: np.ndarray,
-    profiles: List[Tuple[str, str, np.ndarray]]
-) -> Tuple[Optional[str], float, float]:
+    profiles: list[tuple[str, str, np.ndarray]]
+) -> tuple[str | None, float, float]:
     """Match a face embedding against known profiles.
 
     Returns (person_name, best_score, second_best_score).
@@ -187,9 +188,9 @@ def match_face_to_person(
             return None, 0.0, 0.0
 
         # Compute similarities to all profiles
-        scores_by_person: Dict[str, float] = {}
+        scores_by_person: dict[str, float] = {}
 
-        for person_id, person_name, profile_emb in profiles:
+        for _person_id, person_name, profile_emb in profiles:
             sim = cosine_similarity(face_embedding, profile_emb)
             # Keep max score per person (a person may have multiple profiles)
             if person_name not in scores_by_person or sim > scores_by_person[person_name]:
@@ -212,7 +213,7 @@ def match_face_to_person(
         return best_name, best_score, second_best_score
 
 
-def match_face_pgvector(face_embedding: np.ndarray, cur) -> Tuple[Optional[str], float, float]:
+def match_face_pgvector(face_embedding: np.ndarray, cur) -> tuple[str | None, float, float]:
     """Match a face using pgvector ANN instead of the Python cosine loop.
 
     Requires USE_PGVECTOR=true and migrate_pgvector.sql + migrate_embeddings.py
@@ -252,7 +253,7 @@ def match_face_pgvector(face_embedding: np.ndarray, cur) -> Tuple[Optional[str],
     return best_name, best_score, second_best_score
 
 
-def detect_faces(image_path: Path) -> List[dict]:
+def detect_faces(image_path: Path) -> list[dict]:
     """Detect faces in an image.
 
     Returns list of face dicts sorted left-to-right by bounding box x-coordinate.
@@ -327,7 +328,7 @@ def store_face(cur, upload_id: str, face: dict, person_id: str, score: float) ->
     return str(cur.fetchone()['id'])
 
 
-def upsert_edge(cur, person_a_id: str, person_b_id: str) -> Tuple[str, str, bool]:
+def upsert_edge(cur, person_a_id: str, person_b_id: str) -> tuple[str, str, bool]:
     """Insert or update an edge. Returns (person_a_id, person_b_id, is_new)."""
     # Ensure ordered pair (person_a_id < person_b_id)
     if person_a_id > person_b_id:
@@ -402,7 +403,7 @@ def store_edge_evidence(
 
 
 @trace_function("process_image")
-def process_single_image(cur, image_path: Path, profiles: List[Tuple[str, str, np.ndarray]]) -> dict:
+def process_single_image(cur, image_path: Path, profiles: list[tuple[str, str, np.ndarray]]) -> dict:
     """Process a single image through the ingestion pipeline.
 
     Returns stats dict with: faces_detected, known_matches, unknown_faces, edges_created
@@ -821,7 +822,7 @@ def ingest_folder(force: bool = False):
 # Async Batch Ingestion with Job Status
 # ============================================================================
 
-from app.jobs import job_manager, JobStatus
+from app.jobs import job_manager
 
 
 def _process_batch_job(job_id: str, jm, force: bool = False):
@@ -911,7 +912,7 @@ def _process_batch_job(job_id: str, jm, force: bool = False):
                         'status': 'success',
                         **stats
                     })
-                except CircuitBreakerOpen as e:
+                except CircuitBreakerOpen:
                     results.append({
                         'filename': filename,
                         'status': 'failed',

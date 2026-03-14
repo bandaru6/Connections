@@ -4,9 +4,9 @@ Provides distributed tracing capabilities for debugging request flows
 through detection, matching, and graph update operations.
 """
 
-import os
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Optional, Generator, Any
+from typing import Any
 
 from app.observability.config import config
 
@@ -24,10 +24,12 @@ def init_tracing() -> None:
 
     try:
         from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
         # Create resource with service name
         resource = Resource(attributes={
@@ -69,7 +71,7 @@ def get_tracer():
     return _tracer
 
 
-def get_trace_id() -> Optional[str]:
+def get_trace_id() -> str | None:
     """Get the current trace ID if tracing is active."""
     if not config.otel_enabled:
         return None
@@ -88,7 +90,7 @@ def get_trace_id() -> Optional[str]:
     return None
 
 
-def get_span_id() -> Optional[str]:
+def get_span_id() -> str | None:
     """Get the current span ID if tracing is active."""
     if not config.otel_enabled:
         return None
@@ -110,7 +112,7 @@ def get_span_id() -> Optional[str]:
 @contextmanager
 def create_span(
     name: str,
-    attributes: Optional[dict] = None
+    attributes: dict | None = None
 ) -> Generator[Any, None, None]:
     """Create a new tracing span.
 
@@ -140,7 +142,7 @@ class NoOpSpan:
         """No-op set attribute."""
         pass
 
-    def add_event(self, name: str, attributes: Optional[dict] = None) -> None:
+    def add_event(self, name: str, attributes: dict | None = None) -> None:
         """No-op add event."""
         pass
 
@@ -153,7 +155,7 @@ class NoOpSpan:
         pass
 
 
-def trace_function(name: Optional[str] = None):
+def trace_function(name: str | None = None):
     """Decorator to trace a function.
 
     Usage:

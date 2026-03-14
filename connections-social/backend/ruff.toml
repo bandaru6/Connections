@@ -14,10 +14,13 @@ ignore = [
     "E501",  # line too long — handled by formatter
     "B008",  # do not perform function calls in default arguments (FastAPI pattern)
     "UP007", # use X | Y for unions — keep Optional[] for psycopg2 compat
+    "B904",  # raise-without-from-inside-except — FastAPI wraps all exceptions in HTTPException;
+             # chaining adds no value to API consumers who only see the detail string
 ]
 
 [lint.per-file-ignores]
 "tests/*" = ["F401"]  # allow unused imports in test files
+"app/routes/*" = ["E402"]  # mid-file imports exist for circular-import avoidance
 
 [format]
 quote-style = "double"

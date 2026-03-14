@@ -1,11 +1,10 @@
 """Job status and management routes."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from app.jobs import job_manager, JobStatus
+from app.jobs import JobStatus, job_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -52,8 +51,8 @@ def get_job_status(job_id: str):
 
 @router.get("")
 def list_recent_jobs(
-    status: Optional[str] = None,
-    job_type: Optional[str] = None,
+    status: str | None = None,
+    job_type: str | None = None,
     limit: int = 10
 ):
     """List recent jobs.

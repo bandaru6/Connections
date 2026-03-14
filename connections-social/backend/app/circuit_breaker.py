@@ -12,10 +12,11 @@ States:
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 from functools import wraps
-from typing import Callable, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,9 @@ class CircuitBreakerStats:
     state: CircuitState = CircuitState.CLOSED
     failures: int = 0
     successes: int = 0
-    last_failure_time: Optional[float] = None
-    last_success_time: Optional[float] = None
-    opened_at: Optional[float] = None
+    last_failure_time: float | None = None
+    last_success_time: float | None = None
+    opened_at: float | None = None
     total_rejected: int = 0
 
 
@@ -66,7 +67,7 @@ class CircuitBreaker:
             result = model.predict(...)
     """
 
-    def __init__(self, name: str, config: Optional[CircuitBreakerConfig] = None):
+    def __init__(self, name: str, config: CircuitBreakerConfig | None = None):
         self.name = name
         self.config = config or CircuitBreakerConfig()
         self._lock = threading.RLock()
@@ -219,7 +220,7 @@ _circuit_breakers: dict[str, CircuitBreaker] = {}
 
 def get_circuit_breaker(
     name: str,
-    config: Optional[CircuitBreakerConfig] = None
+    config: CircuitBreakerConfig | None = None
 ) -> CircuitBreaker:
     """Get or create a named circuit breaker.
 

@@ -17,14 +17,14 @@ Pool sizing rationale (configurable via env):
 
 import logging
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 import psycopg2
 import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 
-from app.config import DATABASE_URL, DB_POOL_MIN_CONN, DB_POOL_MAX_CONN
+from app.config import DATABASE_URL, DB_POOL_MAX_CONN, DB_POOL_MIN_CONN
 
 logger = logging.getLogger(__name__)
 

@@ -13,26 +13,25 @@ unavailable, all requests fall through to PostgreSQL transparently.
 
 import logging
 from collections import deque
-from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.db import get_cursor
 from app.cache import (
+    NEIGHBORS_TTL,
+    SUMMARY_TTL,
+    cache_key_neighbors,
+    cache_key_summary,
     get_cached,
     set_cached,
-    cache_key_summary,
-    cache_key_neighbors,
-    SUMMARY_TTL,
-    NEIGHBORS_TTL,
 )
+from app.db import get_cursor
 from app.observability.metrics import track_cache_hit, track_cache_miss
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_evidence_filenames(cur, person_a_id: str, person_b_id: str, limit: int = 3) -> List[str]:
+def get_evidence_filenames(cur, person_a_id: str, person_b_id: str, limit: int = 3) -> list[str]:
     """Get up to `limit` evidence filenames for an edge."""
     cur.execute(
         """
@@ -314,7 +313,7 @@ def graph_ego(
 
             # Load all persons for lookup
             cur.execute("SELECT id, name FROM persons")
-            person_lookup: Dict[str, str] = {}  # id -> name
+            person_lookup: dict[str, str] = {}  # id -> name
             for row in cur.fetchall():
                 person_lookup[str(row['id'])] = row['name']
 
@@ -325,8 +324,8 @@ def graph_ego(
             """)
 
             # Build adjacency list
-            adjacency: Dict[str, List[Tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
-            all_edges: List[Tuple[str, str, int]] = []
+            adjacency: dict[str, list[tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
+            all_edges: list[tuple[str, str, int]] = []
 
             for row in cur.fetchall():
                 a_id = str(row['person_a_id'])
@@ -351,12 +350,12 @@ def graph_ego(
                 all_edges.append((a_id, b_id, weight))
 
             # BFS to find nodes within depth
-            visited: Set[str] = set()
+            visited: set[str] = set()
             queue: deque = deque()
             queue.append((center_id, 0))
             visited.add(center_id)
 
-            nodes_in_ego: List[str] = []
+            nodes_in_ego: list[str] = []
 
             while queue and len(nodes_in_ego) < limit:
                 current_id, current_depth = queue.popleft()
@@ -386,7 +385,7 @@ def graph_ego(
 
             # Collect edges between ego nodes
             edges_output = []
-            seen_edges: Set[Tuple[str, str]] = set()
+            seen_edges: set[tuple[str, str]] = set()
 
             for a_id, b_id, weight in all_edges:
                 if a_id in ego_node_ids and b_id in ego_node_ids:
@@ -478,7 +477,7 @@ def graph_path(
 
             # Load all persons for lookup
             cur.execute("SELECT id, name FROM persons")
-            person_lookup: Dict[str, str] = {}  # id -> name
+            person_lookup: dict[str, str] = {}  # id -> name
             for row in cur.fetchall():
                 person_lookup[str(row['id'])] = row['name']
 
@@ -489,8 +488,8 @@ def graph_path(
             """)
 
             # Build adjacency list
-            adjacency: Dict[str, List[Tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
-            edge_weights: Dict[Tuple[str, str], int] = {}  # (a_id, b_id) -> weight
+            adjacency: dict[str, list[tuple[str, int]]] = {}  # person_id -> [(neighbor_id, weight), ...]
+            edge_weights: dict[tuple[str, str], int] = {}  # (a_id, b_id) -> weight
 
             for row in cur.fetchall():
                 a_id = str(row['person_a_id'])
@@ -518,8 +517,8 @@ def graph_path(
                 edge_weights[edge_key] = weight
 
             # BFS to find shortest path
-            visited: Set[str] = set()
-            parent: Dict[str, str] = {}  # child_id -> parent_id
+            visited: set[str] = set()
+            parent: dict[str, str] = {}  # child_id -> parent_id
             queue: deque = deque()
             queue.append(source_id)
             visited.add(source_id)
@@ -549,7 +548,7 @@ def graph_path(
                 }
 
             # Reconstruct path
-            path_ids: List[str] = []
+            path_ids: list[str] = []
             current = target_id
             while current:
                 path_ids.append(current)
@@ -599,7 +598,7 @@ def graph_path(
 
 @router.get("/persons/list")
 def list_persons(
-    q: Optional[str] = Query(None, description="Search query filter (case-insensitive)"),
+    q: str | None = Query(None, description="Search query filter (case-insensitive)"),
     include_unknown: bool = Query(False, description="Include UNKNOWN persons"),
     limit: int = Query(50, ge=1, le=500, description="Max persons to return")
 ):
@@ -616,16 +615,16 @@ def list_persons(
             # Filter unknown
             if not include_unknown:
                 conditions.append("name NOT LIKE 'UNKNOWN_%%'")
-            
+
             # Filter by search query
             if q:
                 conditions.append("name ILIKE %s")
                 params.append(f"%{q}%")
-            
+
             # Assemble query
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
-            
+
             query += " ORDER BY name LIMIT %s"
             params.append(limit)
 

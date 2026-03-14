@@ -22,7 +22,7 @@ Architecture:
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def _ensure_index(client) -> None:
     logger.info("Created Elasticsearch index: %s", INDEX_NAME)
 
 
-def index_event(event: Dict[str, Any]) -> None:
+def index_event(event: dict[str, Any]) -> None:
     """Index an ObservationEvent document.
 
     Called from the ingest route after every upload (success or skip).
@@ -122,12 +122,12 @@ def index_event(event: Dict[str, Any]) -> None:
 
 
 def search_events(
-    q: Optional[str] = None,
-    stage: Optional[str] = None,
-    min_faces: Optional[int] = None,
+    q: str | None = None,
+    stage: str | None = None,
+    min_faces: int | None = None,
     limit: int = 20,
     offset: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Search indexed ObservationEvents.
 
     Args:
@@ -145,8 +145,8 @@ def search_events(
         return {"total": 0, "hits": [], "took_ms": None, "note": "Elasticsearch unavailable"}
 
     limit = min(limit, 200)
-    must: List[Dict] = []
-    filter_: List[Dict] = []
+    must: list[dict] = []
+    filter_: list[dict] = []
 
     if q:
         must.append({
@@ -162,7 +162,7 @@ def search_events(
     if min_faces is not None:
         filter_.append({"range": {"faces_detected": {"gte": min_faces}}})
 
-    query: Dict = {"bool": {}}
+    query: dict = {"bool": {}}
     if must:
         query["bool"]["must"] = must
     if filter_:
@@ -191,7 +191,7 @@ def search_events(
         return {"total": 0, "hits": [], "took_ms": None, "error": str(e)}
 
 
-def get_index_stats() -> Dict[str, Any]:
+def get_index_stats() -> dict[str, Any]:
     """Return document count and index size for the ingest_events index."""
     client = _get_client()
     if client is None:

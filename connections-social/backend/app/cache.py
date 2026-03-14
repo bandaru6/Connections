@@ -29,7 +29,7 @@ where k is the number of cached endpoints (typically < 20 keys).
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import redis as redis_lib
 
@@ -43,7 +43,7 @@ NEIGHBORS_TTL = 30  # neighbor lists change more frequently after ingest
 CACHE_KEY_PREFIX = "graph:"
 
 
-def _get_redis() -> Optional[redis_lib.Redis]:
+def _get_redis() -> redis_lib.Redis | None:
     """Return a Redis client, or None if unavailable."""
     try:
         r = redis_lib.from_url(REDIS_URL, socket_timeout=1, socket_connect_timeout=1)
@@ -53,7 +53,7 @@ def _get_redis() -> Optional[redis_lib.Redis]:
         return None
 
 
-def get_cached(key: str) -> Optional[Any]:
+def get_cached(key: str) -> Any | None:
     """Return deserialized cached value, or None on miss/error."""
     r = _get_redis()
     if r is None:

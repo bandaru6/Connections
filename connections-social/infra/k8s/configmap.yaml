@@ -23,7 +23,11 @@ data:
   LOG_LEVEL: "INFO"
   LOG_JSON: "true"
   METRICS_ENABLED: "true"
-  OTEL_ENABLED: "false"
+  # OTel enabled — traces shipped to Jaeger via OTLP gRPC on port 4317
+  # Override OTEL_EXPORTER_OTLP_ENDPOINT if Jaeger is not co-located
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
+  OTEL_SERVICE_NAME: "connections-backend"
 
   # Connection pool sizing
   # Rule of thumb: max = (2 * vCPU count) + spindles, capped at DB max_connections / replicas
@@ -33,3 +37,16 @@ data:
 
   # ML model
   INSIGHTFACE_MODEL: "buffalo_l"
+
+  # pgvector feature flag — set to "true" after running:
+  #   psql $DATABASE_URL -f infra/docker/migrate_pgvector.sql
+  #   python scripts/migrate_embeddings.py
+  # Switches face matching from O(n) Python cosine loop to O(sqrt(n)) IVFFlat ANN
+  USE_PGVECTOR: "false"
+
+  # Upload validation limits
+  MAX_UPLOAD_BYTES: "52428800"  # 50 MB
+
+  # Elasticsearch (optional) — indexes every ObservationEvent for full-text search
+  # Set to empty string to disable; the backend fails open if ES is unavailable
+  ELASTICSEARCH_URL: "http://elasticsearch:9200"

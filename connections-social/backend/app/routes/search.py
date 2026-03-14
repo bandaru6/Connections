@@ -1,11 +1,10 @@
 """Search routes — full-text event search backed by Elasticsearch."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from app.search import search_events, get_index_stats
+from app.search import get_index_stats, search_events
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -13,9 +12,9 @@ router = APIRouter()
 
 @router.get("/events")
 def search_ingest_events(
-    q: Optional[str] = Query(None, description="Full-text query (filename, stage, error)"),
-    stage: Optional[str] = Query(None, description="Filter by stage: PERSISTED, FAILED, SKIPPED"),
-    min_faces: Optional[int] = Query(None, ge=0, description="Min faces detected"),
+    q: str | None = Query(None, description="Full-text query (filename, stage, error)"),
+    stage: str | None = Query(None, description="Filter by stage: PERSISTED, FAILED, SKIPPED"),
+    min_faces: int | None = Query(None, ge=0, description="Min faces detected"),
     limit: int = Query(20, ge=1, le=200, description="Max results"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
 ):

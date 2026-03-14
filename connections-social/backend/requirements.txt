@@ -22,6 +22,9 @@ opentelemetry-sdk>=1.22.0
 opentelemetry-exporter-otlp>=1.22.0
 opentelemetry-instrumentation-fastapi>=0.43b0
 
+# Elasticsearch (optional — search indexing for ObservationEvents; fails open if unavailable)
+elasticsearch>=8.12.0
+
 # Utilities
 python-dotenv>=1.0.0
 psutil>=5.9.0

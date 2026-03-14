@@ -4,13 +4,12 @@ import logging
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
-from app.config import PROFILES_DIR, UPLOADS_DIR, BASE_DIR, INSIGHTFACE_MODEL
+from app.config import BASE_DIR, INSIGHTFACE_MODEL, PROFILES_DIR, UPLOADS_DIR
 from app.db import get_cursor
 from app.jobs import job_manager
 
@@ -40,7 +39,7 @@ def pack_embedding(embedding: np.ndarray) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding.astype(np.float32))
 
 
-def scan_profile_images(profiles_dir: Path) -> List[Tuple[str, Path]]:
+def scan_profile_images(profiles_dir: Path) -> list[tuple[str, Path]]:
     """
     Scan profiles directory and return sorted list of (person_name, image_path).
 
@@ -69,7 +68,7 @@ def scan_profile_images(profiles_dir: Path) -> List[Tuple[str, Path]]:
     return results
 
 
-def extract_single_face(image_path: Path) -> Tuple[np.ndarray, None] | Tuple[None, str]:
+def extract_single_face(image_path: Path) -> tuple[np.ndarray, None] | tuple[None, str]:
     """
     Extract face embedding from image. Returns (embedding, None) on success,
     or (None, error_message) on failure.
@@ -309,15 +308,15 @@ def storage_info():
 
 @router.post("/replay")
 def replay_processing(
-    from_date: Optional[str] = Query(
+    from_date: str | None = Query(
         None,
         description="Start date for replay (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
     ),
-    to_date: Optional[str] = Query(
+    to_date: str | None = Query(
         None,
         description="End date for replay (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
     ),
-    model_version: Optional[str] = Query(
+    model_version: str | None = Query(
         None,
         description="Only replay images processed by this model version"
     ),
@@ -415,17 +414,16 @@ def replay_processing(
 
 
 def _execute_replay_sync(
-    from_date: Optional[datetime],
-    to_date: Optional[datetime],
-    model_version: Optional[str]
+    from_date: datetime | None,
+    to_date: datetime | None,
+    model_version: str | None
 ) -> dict:
     """Execute replay synchronously and return results."""
     from app.routes.ingest import (
+        MODEL_VERSION,
         ensure_tables_exist,
         load_profile_embeddings,
         process_single_image,
-        is_already_processed,
-        MODEL_VERSION,
     )
 
     try:
@@ -544,16 +542,16 @@ def _execute_replay_sync(
 def _execute_replay(
     job_id: str,
     jm,
-    from_date: Optional[datetime],
-    to_date: Optional[datetime],
-    model_version: Optional[str]
+    from_date: datetime | None,
+    to_date: datetime | None,
+    model_version: str | None
 ):
     """Execute replay as background job."""
     from app.routes.ingest import (
+        MODEL_VERSION,
         ensure_tables_exist,
         load_profile_embeddings,
         process_single_image,
-        MODEL_VERSION,
     )
 
     try:
@@ -711,7 +709,10 @@ def benchmark_matching(top_k: int = 5, iterations: int = 10):
     """
     import time as time_lib
 
-    from app.routes.ingest import load_profile_embeddings, cosine_similarity, unpack_embedding
+    from app.routes.ingest import (
+        cosine_similarity,
+        load_profile_embeddings,
+    )
 
     try:
         with get_cursor() as cur:
@@ -874,7 +875,6 @@ def pipeline_report():
     p95 processing latency.
     """
     from app.db import get_pool_status
-    from app.cache import get_cached
 
     try:
         with get_cursor() as cur:
@@ -912,7 +912,6 @@ def pipeline_report():
             match_rate = round(matched_faces / total_faces, 4) if total_faces > 0 else 0.0
 
             # ── Dead-letter queue ─────────────────────────────────────────────
-            dead_letter_exists = False
             dead_letter_stats: dict = {}
             try:
                 cur.execute(
@@ -937,7 +936,6 @@ def pipeline_report():
                     "unresolved": unresolved,
                     "by_stage": by_stage,
                 }
-                dead_letter_exists = True
             except Exception:
                 dead_letter_stats = {
                     "note": "Run infra/docker/migrate_failed_ingests.sql to enable dead-letter tracking"
@@ -1011,7 +1009,6 @@ def retry_failed_ingests(limit: int = 50):
         ensure_tables_exist,
         load_profile_embeddings,
         process_single_image,
-        MODEL_VERSION,
     )
 
     retried = 0
